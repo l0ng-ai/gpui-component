@@ -324,6 +324,13 @@ impl PopupMenu {
         cx.new(|cx| f(Self::new(cx), window, cx))
     }
 
+    /// Set the [`Size`] of the menu, controlling per-item height/radius.
+    /// Defaults to [`Size::default`]; `Size::Small` yields a tighter menu.
+    pub fn with_size(mut self, size: impl Into<Size>) -> Self {
+        self.size = size.into();
+        self
+    }
+
     /// Set the focus handle of Entity to handle actions.
     ///
     /// When the menu is dismissed or before an action is triggered, the focus will be returned to this handle.
@@ -1113,10 +1120,12 @@ impl PopupMenu {
             PopupMenuItem::Separator => this
                 .h_auto()
                 .p_0()
-                .my_0p5()
+                .my_1()
                 .mx_neg_1()
-                .border_b(px(2.))
-                .border_color(cx.theme().border)
+                // A 1px hairline at reduced opacity reads as a modern menu
+                // divider; the old 2px solid border looked heavy / dated.
+                .border_b(px(1.))
+                .border_color(cx.theme().border.opacity(0.6))
                 .disabled(true),
             PopupMenuItem::Label(label) => this.disabled(true).cursor_default().child(
                 h_flex()
