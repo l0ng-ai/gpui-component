@@ -473,7 +473,18 @@ where
                     .secondary_selected(mouse_right_clicked)
             }))
             .when(selectable, |this| {
-                this.on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                // Hover moves the selection so the highlight is a single bar that
+                // follows the mouse — matching the PopupMenu (context menu /
+                // dropdown), instead of showing a second, lighter `list_hover`
+                // row alongside the keyboard-selected one. Guarded so it only
+                // fires when the pointer crosses into a new row.
+                this.on_mouse_move(cx.listener(move |this, _, window, cx| {
+                    if this.selected_index.map(|s| s.eq_row(ix)) != Some(true) {
+                        this.set_selected_index(Some(ix), window, cx);
+                        cx.notify();
+                    }
+                }))
+                .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                     this.set_right_clicked_index(None, window, cx);
                     this.selected_index = Some(ix);
                     this.on_action_confirm(

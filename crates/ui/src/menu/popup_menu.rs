@@ -10,7 +10,7 @@ use gpui::{
     ParentElement, Pixels, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
     WeakEntity, Window, anchored, div, prelude::FluentBuilder, px, rems,
 };
-use gpui::{ClickEvent, Half, MouseDownEvent, OwnedMenuItem, Point, Subscription};
+use gpui::{ClickEvent, MouseDownEvent, OwnedMenuItem, Point, Subscription};
 
 use std::rc::Rc;
 
@@ -1092,17 +1092,22 @@ impl PopupMenu {
         let is_submenu = matches!(item, PopupMenuItem::Submenu { .. });
         let group_name = format!("{}:item-{}", cx.entity().entity_id(), ix);
 
-        let (item_height, radius) = match self.size {
-            Size::Small => (px(20.), options.radius.half()),
-            _ => (px(26.), options.radius),
+        let item_height = match self.size {
+            Size::Small => px(20.),
+            _ => px(26.),
         };
 
+        // Selection paints edge-to-edge (no rounded pill, no side inset) so the
+        // context menu / dropdown share the flat, full-bleed highlight language of
+        // the completion popup and command palette — see tty7's `apply_theme`.
+        // The list keeps only vertical padding (below), which lifts the first/last
+        // row's fill clear of the popover's rounded corners the same way the
+        // completion menu's `py_1` does.
         let this = MenuItemElement::new(ix, &group_name)
             .relative()
             .text_sm()
             .py_0()
             .px(INNER_PADDING)
-            .rounded(radius)
             .items_center()
             .selected(selected)
             .on_hover(cx.listener(move |this, hovered, _, cx| {
@@ -1121,9 +1126,8 @@ impl PopupMenu {
                 .h_auto()
                 .p_0()
                 .my_1()
-                .mx_neg_1()
-                // A 1px hairline at reduced opacity reads as a modern menu
-                // divider; the old 2px solid border looked heavy / dated.
+                // Full-bleed hairline: the list no longer pads its sides, so the
+                // divider spans edge to edge with no negative margin.
                 .border_b(px(1.))
                 .border_color(cx.theme().border.opacity(0.6))
                 .disabled(true),
@@ -1286,7 +1290,6 @@ impl Focusable for PopupMenu {
 struct RenderOptions {
     has_left_icon: bool,
     check_side: Side,
-    radius: Pixels,
 }
 
 impl Render for PopupMenu {
@@ -1310,7 +1313,6 @@ impl Render for PopupMenu {
         let options = RenderOptions {
             has_left_icon,
             check_side: self.check_side,
-            radius: cx.theme().radius.min(px(8.)),
         };
 
         v_flex()
@@ -1331,8 +1333,11 @@ impl Render for PopupMenu {
             .child(
                 v_flex()
                     .id("items")
-                    .p_1()
-                    .gap_y_0p5()
+                    // Vertical-only padding: rows run edge to edge for a flat,
+                    // full-bleed selection, while the 4px top/bottom inset keeps
+                    // the first/last row's fill clear of the popover's rounded
+                    // corners. No inter-row gap — the fill reads as one column.
+                    .py_1()
                     .min_w(rems(8.))
                     .when_some(self.min_width, |this, min_width| this.min_w(min_width))
                     .max_w(max_width)
