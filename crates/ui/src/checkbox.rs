@@ -1,13 +1,13 @@
-use std::{rc::Rc, time::Duration};
+use std::rc::Rc;
 
 use crate::{
     ActiveTheme, Disableable, FocusableExt, IconName, Selectable, Sizable, Size, StyledExt as _,
     icon::IconNamed, text::Text, tooltip::ComponentTooltip, v_flex,
 };
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Div, ElementId, InteractiveElement, IntoElement,
-    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled,
-    Window, div, prelude::FluentBuilder as _, px, relative, rems, svg,
+    AnyElement, App, Div, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
+    SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
+    prelude::FluentBuilder as _, px, relative, rems, svg,
 };
 
 /// A Checkbox element.
@@ -141,20 +141,21 @@ impl Sizable for Checkbox {
 }
 
 pub(crate) fn checkbox_check_icon(
-    id: ElementId,
+    _id: ElementId,
     size: Size,
     checked: bool,
     disabled: bool,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement {
-    let toggle_state = window.use_keyed_state(id, cx, |_, _| checked);
     let color = if disabled {
         cx.theme().primary_foreground.opacity(0.5)
     } else {
         cx.theme().primary_foreground
     };
 
+    // The check mark toggles instantly — no fade-in/out animation. (Upstream
+    // cross-fades over 0.25s via `with_animation`; tty7 wants a static check.)
     svg()
         .absolute()
         .top_px()
@@ -170,30 +171,6 @@ pub(crate) fn checkbox_check_icon(
         .map(|this| match checked {
             true => this.path(IconName::Check.path()),
             _ => this,
-        })
-        .map(|this| {
-            if !disabled && checked != *toggle_state.read(cx) {
-                let duration = Duration::from_secs_f64(0.25);
-                cx.spawn({
-                    let toggle_state = toggle_state.clone();
-                    async move |cx| {
-                        cx.background_executor().timer(duration).await;
-                        _ = toggle_state.update(cx, |this, _| *this = checked);
-                    }
-                })
-                .detach();
-
-                this.with_animation(
-                    ElementId::NamedInteger("toggle".into(), checked as u64),
-                    Animation::new(Duration::from_secs_f64(0.25)),
-                    move |this, delta| {
-                        this.opacity(if checked { 1.0 * delta } else { 1.0 - delta })
-                    },
-                )
-                .into_any_element()
-            } else {
-                this.into_any_element()
-            }
         })
 }
 
