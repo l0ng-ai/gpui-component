@@ -653,12 +653,15 @@ where
                     div()
                         .map(|this| match self.options.size {
                             Size::Small => this.px_1p5(),
-                            _ => this.px_2(),
+                            // Spotlight-style search row: extra vertical
+                            // padding so the input reads as the headline
+                            // control, not just another list row.
+                            _ => this.px_2().py_1p5(),
                         })
                         .border_b_1()
                         .border_color(cx.theme().border)
-                        .child(
-                            Input::new(&input)
+                        .child({
+                            let input = Input::new(&input)
                                 .with_size(self.options.size)
                                 .prefix(
                                     Icon::new(IconName::Search)
@@ -666,8 +669,13 @@ where
                                 )
                                 .cleanable(true)
                                 .p_0()
-                                .appearance(false),
-                        ),
+                                .appearance(false);
+                            match self.options.size {
+                                Size::Small => input,
+                                // Larger query text to match the taller row.
+                                _ => input.text_size(px(15.)),
+                            }
+                        }),
                 )
             })
             .when(!loading, |this| {
