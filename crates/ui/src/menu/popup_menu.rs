@@ -1097,17 +1097,16 @@ impl PopupMenu {
             _ => px(26.),
         };
 
-        // Selection paints edge-to-edge (no rounded pill, no side inset) so the
-        // context menu / dropdown share the flat, full-bleed highlight language of
-        // the completion popup and command palette — see tty7's `apply_theme`.
-        // The list keeps only vertical padding (below), which lifts the first/last
-        // row's fill clear of the popover's rounded corners the same way the
-        // completion menu's `py_1` does.
+        // macOS Sonoma menu language: the hovered/selected row paints a rounded
+        // pill inset by the list's 5px padding (see `Render`) rather than a flat
+        // full-bleed bar. The pill keeps the theme's soft accent fill/text
+        // (`tokens.accent` / `accent_foreground` — see tty7's `apply_theme`).
         let this = MenuItemElement::new(ix, &group_name)
             .relative()
-            .text_sm()
+            .text_size(px(13.))
             .py_0()
             .px(INNER_PADDING)
+            .rounded(px(6.))
             .items_center()
             .selected(selected)
             .on_hover(cx.listener(move |this, hovered, _, cx| {
@@ -1126,8 +1125,9 @@ impl PopupMenu {
                 .h_auto()
                 .p_0()
                 .my_1()
-                // Full-bleed hairline: the list no longer pads its sides, so the
-                // divider spans edge to edge with no negative margin.
+                // Inset hairline, macOS-style: the divider stops short of the
+                // panel edges instead of running full bleed.
+                .mx_2()
                 .border_b(px(1.))
                 .border_color(cx.theme().border.opacity(0.6))
                 .disabled(true),
@@ -1327,17 +1327,21 @@ impl Render for PopupMenu {
             .on_action(cx.listener(Self::dismiss))
             .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
             .popover_style(cx)
+            // macOS Sonoma menu panel: a touch rounder than the app-wide 8px
+            // radius and a floatier shadow. The fill stays fully opaque — GPUI
+            // popups render in-window with no backdrop blur, and an unblurred
+            // translucent panel just ghosts the terminal text through.
+            .rounded(px(10.))
+            .shadow_xl()
             .text_color(cx.theme().popover_foreground)
             .relative()
             .occlude()
             .child(
                 v_flex()
                     .id("items")
-                    // Vertical-only padding: rows run edge to edge for a flat,
-                    // full-bleed selection, while the 4px top/bottom inset keeps
-                    // the first/last row's fill clear of the popover's rounded
-                    // corners. No inter-row gap — the fill reads as one column.
-                    .py_1()
+                    // 5px inset all around so the rounded selection pill floats
+                    // clear of the panel edges, per the macOS Sonoma menu look.
+                    .p(px(5.))
                     .min_w(rems(8.))
                     .when_some(self.min_width, |this, min_width| this.min_w(min_width))
                     .max_w(max_width)
