@@ -799,7 +799,11 @@ impl ButtonVariant {
             }
             Self::Link => cx.theme().link,
             Self::Text => cx.theme().foreground,
-            Self::Custom(colors) => colors.color,
+            // The variant's own `foreground`, not its background: returning
+            // `color` here made every custom button paint its label in its own
+            // background color, so `.foreground(...)` was silently dead and a
+            // transparent-background tile rendered an invisible glyph.
+            Self::Custom(colors) => colors.foreground,
         }
     }
 

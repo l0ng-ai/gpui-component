@@ -657,6 +657,16 @@ fn shape_line(
     runs: &[TextRun],
     window: &mut Window,
 ) -> ShapedLine {
+    // An inline text item can carry literal newlines (e.g. a multi-line HTML
+    // block whose text nodes keep their source formatting). The line breaker
+    // slices by width, not by `\n`, so a stray hard break would reach gpui's
+    // shaper, which panics on newlines. Replace instead of stripping: the
+    // byte length stays the same, so run/highlight offsets remain valid.
+    let text = if text.contains(['\n', '\r']) {
+        SharedString::from(text.replace(['\n', '\r'], " "))
+    } else {
+        text
+    };
     window.text_system().shape_line(text, font_size, runs, None)
 }
 
