@@ -934,6 +934,12 @@ impl ButtonVariant {
                     cx.theme().tokens.button_info_hover.into()
                 }
             }
+            // `hover` is what the caller asked for; only fall back to shading
+            // `color` when it was left at the default transparent. Deriving it
+            // unconditionally silently discarded `ButtonCustomVariant::hover`,
+            // and a tile whose resting `color` is transparent then had no hover
+            // state at all — transparent shaded by transparent is transparent.
+            Self::Custom(colors) if !colors.hover.is_transparent() => colors.hover.into(),
             Self::Custom(colors) => if outline {
                 colors.color.mix_oklab(cx.theme().transparent, 0.2)
             } else {
@@ -1025,6 +1031,10 @@ impl ButtonVariant {
                     cx.theme().tokens.button_info_active.into()
                 }
             }
+            // Same as `hovered`: honour `active` when it was set, so pressing a
+            // custom tile lands on the colour the caller named — which is also
+            // what `selected` already paints.
+            Self::Custom(colors) if !colors.active.is_transparent() => colors.active.into(),
             Self::Custom(colors) => colors.color.mix_oklab(cx.theme().transparent, 0.4).into(),
             Self::Link => cx.theme().transparent.into(),
             Self::Text => cx.theme().transparent.into(),
