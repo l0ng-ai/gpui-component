@@ -21,12 +21,14 @@ use crate::{
     scroll::Scrollbar,
 };
 
-use super::{InputState, LastLayout, WhitespaceIndicators, mode::InputMode};
+use super::{ChangeBar, InputState, LastLayout, WhitespaceIndicators, mode::InputMode};
 
 const BOTTOM_MARGIN_ROWS: usize = 3;
 pub(super) const RIGHT_MARGIN: Pixels = px(10.);
 pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
 const FOLD_ICON_WIDTH: Pixels = px(14.);
+/// Width of the source-control change bar on the gutter's leading edge.
+const CHANGE_BAR_WIDTH: Pixels = px(2.);
 const FOLD_ICON_HITBOX_WIDTH: Pixels = px(18.);
 const MAX_HIGHLIGHT_LINE_LENGTH: usize = 10_000;
 
@@ -2152,6 +2154,7 @@ impl Element for TextElement {
         }
 
         // Paint line numbers
+        let change_bars = self.state.read(cx).change_bars().clone();
         let mut offset_y = px(0.);
         if let Some(line_numbers) = prepaint.line_numbers.as_ref() {
             offset_y += invisible_top_padding;
@@ -2200,6 +2203,21 @@ impl Element for TextElement {
                             bg_color,
                         ));
                     }
+                }
+
+                // Paint the source-control change bar, above the gutter
+                // background but below the line number itself.
+                if let Some(kind) = change_bars.get(&buffer_line) {
+                    let (bar_size, color) = match kind {
+                        // A deletion owns no row of its own, so mark it with a
+                        // small wedge at the top of the row that follows it
+                        // rather than a full-height bar.
+                        ChangeBar::Deleted => (size(CHANGE_BAR_WIDTH, px(4.)), cx.theme().danger),
+                        ChangeBar::Added => (size(CHANGE_BAR_WIDTH, height), cx.theme().success),
+                        ChangeBar::Modified => (size(CHANGE_BAR_WIDTH, height), cx.theme().warning),
+                    };
+                    let color = if disabled { color.opacity(0.5) } else { color };
+                    window.paint_quad(fill(Bounds::new(p, bar_size), color));
                 }
 
                 for line in lines {

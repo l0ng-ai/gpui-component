@@ -16,6 +16,7 @@ use ropey::{Rope, RopeSlice};
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 use sum_tree::Bias;
@@ -336,6 +337,21 @@ impl LastLayout {
     }
 }
 
+/// A source-control change marker painted in the line-number gutter.
+///
+/// See [`InputState::set_change_bars`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChangeBar {
+    /// The row is newly added.
+    Added,
+    /// The row exists on both sides but its content changed.
+    Modified,
+    /// Content was removed immediately above the row. Painted as a small wedge
+    /// at the top of the row instead of a full-height bar, because a deletion
+    /// occupies no rows of its own.
+    Deleted,
+}
+
 /// InputState to keep editing state of the [`super::Input`].
 pub struct InputState {
     pub(super) focus_handle: FocusHandle,
@@ -377,6 +393,8 @@ pub struct InputState {
     /// See [`Self::cursor_surrounding_lines`].
     pub(super) cursor_surrounding_lines: Option<usize>,
     pub(super) show_whitespaces: bool,
+    /// See [`Self::set_change_bars`].
+    pub(super) change_bars: Rc<HashMap<usize, ChangeBar>>,
     /// This flag tells the renderer to prefer the end of the current visual line.
     pub(crate) cursor_line_end_affinity: bool,
     pub(super) pattern: Option<regex::Regex>,
@@ -505,6 +523,7 @@ impl InputState {
             scroll_beyond_last_line: None,
             cursor_surrounding_lines: None,
             show_whitespaces: false,
+            change_bars: Rc::new(HashMap::new()),
             loading: false,
             pattern: None,
             validate: None,
@@ -721,6 +740,25 @@ impl InputState {
             _ => {}
         }
         cx.notify();
+    }
+
+    /// Set the source-control change bars painted in the line-number gutter.
+    ///
+    /// Keys are buffer rows (0-based); rows without an entry get no bar. The
+    /// map is shared by [`Rc`] so callers can keep it around and hand the same
+    /// allocation back on every update.
+    ///
+    /// Bars follow the gutter's own vertical stepping, so they stay aligned
+    /// under soft wrap and code folding.
+    pub fn set_change_bars(&mut self, bars: Rc<HashMap<usize, ChangeBar>>, cx: &mut Context<Self>) {
+        self.change_bars = bars;
+        cx.notify();
+    }
+
+    /// The change bars painted in the line-number gutter.
+    #[inline]
+    pub fn change_bars(&self) -> &Rc<HashMap<usize, ChangeBar>> {
+        &self.change_bars
     }
 
     #[inline]
