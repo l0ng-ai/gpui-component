@@ -10,7 +10,7 @@ use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, Context,
     DismissEvent, Div, ElementId, Entity, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement, StyleRefinement,
-    Styled, Subscription, Window, div, hsla, prelude::FluentBuilder, px,
+    Styled, Subscription, Window, div, hsla, prelude::FluentBuilder, px, rems,
 };
 
 use crate::{
@@ -38,10 +38,15 @@ impl NotificationType {
             Self::Warning => (IconName::TriangleAlert, cx.theme().warning),
             Self::Error => (IconName::CircleX, cx.theme().danger),
         };
-        // 14px rather than the default 16. A saturated status glyph is the
-        // loudest thing on a card that is otherwise all greys, and it only has
-        // to be legible — it does not have to announce itself.
-        Icon::new(name).text_color(color).size(px(14.))
+        // A step under the default, which is the inherited text size. A
+        // saturated status glyph is the loudest thing on a card that is
+        // otherwise all greys, and it only has to be legible — it does not
+        // have to announce itself.
+        //
+        // In rems, not pixels: `Icon`'s own default tracks `rem_size`, so a
+        // pixel here would freeze the glyph at 14 while every word beside it
+        // grew with the interface font scale.
+        Icon::new(name).text_color(color).size(rems(14. / 16.))
     }
 }
 
@@ -302,8 +307,14 @@ impl Styled for Notification {
 /// of the content, so both centre on the message's *first line* rather than on
 /// the whole block. Centring on the block puts them visibly off-centre the
 /// moment a message wraps, which the shorter lines of CJK text do often.
+///
+/// In rems, because the line it is centring on is itself a rem: `text_sm()` is
+/// `rems(0.875)`, and a host that moves `rem_size` — which is the whole point
+/// of an interface font-size setting — moves the first line without moving a
+/// height written in pixels. That reintroduces exactly the off-centre glyph
+/// this box exists to prevent, just at a different font size.
 fn first_line_box() -> Div {
-    h_flex().flex_shrink_0().self_start().h(px(23.))
+    h_flex().flex_shrink_0().self_start().h(rems(23. / 16.))
 }
 
 impl Render for Notification {
@@ -330,7 +341,7 @@ impl Render for Notification {
             .group("")
             .occlude()
             .relative()
-            .w(px(400.))
+            .w(rems(25.))
             .bg(cx.theme().tokens.popover)
             .rounded(px(12.))
             // A drawn 1px border is what makes a floating card read as a web
@@ -356,7 +367,7 @@ impl Render for Notification {
                 ]
             })
             .py_4()
-            .px(px(18.))
+            .px(rems(18. / 16.))
             .gap_3()
             .refine_style(&self.style)
             .when_some(icon, |this, icon| this.child(first_line_box().child(icon)))
@@ -379,10 +390,16 @@ impl Render for Notification {
                     // Without a title the message *is* the text, so it keeps
                     // full size and full contrast — shrinking and greying the
                     // only thing on the card would be pure loss.
+                    //
+                    // A rem, not a pixel: the step down is *relative* to the
+                    // title, and `text_sm()` above it is `rems(0.875)`. Frozen
+                    // at 13px the rank narrows as the host's `rem_size` grows
+                    // and inverts once it drops below 15 — a "smaller, quieter
+                    // detail" set larger than the title it sits under.
                     .when_some(self.message.clone(), |this, message| {
                         this.child(match self.title.is_some() {
                             true => div()
-                                .text_size(px(13.))
+                                .text_size(rems(13. / 16.))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(message),
                             false => div().text_sm().child(message),
