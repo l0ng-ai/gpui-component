@@ -217,6 +217,15 @@ where
         self.query_input.update(cx, |input, cx| {
             input.set_value(query, window, cx);
         });
+        // `set_value` is deliberately silent — it suppresses `InputEvent` so
+        // that setting a field's contents in code cannot look like the user
+        // typing, which would loop straight back into whatever wrote it. The
+        // search here runs off exactly that event, so without this the query
+        // appeared in the box and the list went on showing everything: the
+        // one thing this method's name promises is the one thing it did not
+        // do. Run the search the way a keystroke would.
+        let input = self.query_input.clone();
+        self.on_query_input_event(&input, &InputEvent::Change, window, cx);
     }
 
     /// Set a specific list item for measurement.
