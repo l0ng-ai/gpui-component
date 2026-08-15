@@ -8,7 +8,7 @@ use std::{
 
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, Context,
-    DismissEvent, ElementId, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    DismissEvent, Div, ElementId, Entity, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement, StyleRefinement,
     Styled, Subscription, Window, div, prelude::FluentBuilder, px,
 };
@@ -290,6 +290,17 @@ impl Styled for Notification {
     }
 }
 
+/// The line box of one `text_sm` row: gpui lays text out at a φ line height, so
+/// 14px text occupies 23px.
+///
+/// The icon and the close button ride in a box of this height pinned to the top
+/// of the content, so both centre on the message's *first line* rather than on
+/// the whole block. Centring on the block puts them visibly off-centre the
+/// moment a message wraps, which the shorter lines of CJK text do often.
+fn first_line_box() -> Div {
+    h_flex().flex_shrink_0().self_start().h(px(23.))
+}
+
 impl Render for Notification {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = self
@@ -299,14 +310,13 @@ impl Render for Notification {
         let action = self
             .action_builder
             .clone()
-            .map(|builder| builder(self, window, cx).small().mr_3p5());
+            .map(|builder| builder(self, window, cx).small());
 
         let closing = self.closing;
         let icon = match self.type_ {
             None => self.icon.clone(),
             Some(type_) => Some(type_.icon(cx)),
         };
-        let has_icon = icon.is_some();
         let placement = cx.theme().notification.placement;
 
         h_flex()
@@ -324,14 +334,11 @@ impl Render for Notification {
             .px_4()
             .gap_3()
             .refine_style(&self.style)
-            .when_some(icon, |this, icon| {
-                this.child(div().absolute().top(px(18.)).left_4().child(icon))
-            })
+            .when_some(icon, |this, icon| this.child(first_line_box().child(icon)))
             .child(
                 v_flex()
                     .flex_1()
                     .overflow_hidden()
-                    .when(has_icon, |this| this.pl_6())
                     .when_some(self.title.clone(), |this, title| {
                         this.child(div().text_sm().font_semibold().child(title))
                     })
@@ -342,10 +349,7 @@ impl Render for Notification {
             )
             .when_some(action, |this, action| this.child(action))
             .child(
-                div()
-                    .absolute()
-                    .top_1()
-                    .right_1()
+                first_line_box()
                     .invisible()
                     .group_hover("", |this| this.visible())
                     .child(
