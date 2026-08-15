@@ -1,7 +1,7 @@
 use gpui::Corners;
 use gpui::Half;
 use gpui::{
-    AnyElement, App, Bounds, Edges, Element, ElementId, ElementInputHandler, Entity,
+    AnyElement, App, Bounds, ContentMask, Edges, Element, ElementId, ElementInputHandler, Entity,
     GlobalElementId,
 };
 use gpui::{
@@ -2034,122 +2034,144 @@ impl Element for TextElement {
             }
         }
 
-        // Paint indent guides
-        if let Some(path) = prepaint.indent_guides_path.take() {
-            window.paint_path(path, cx.theme().border.opacity(0.85));
-        }
-
-        // Paint selections
-        if window.is_window_active() {
-            let secondary_selection = cx.theme().selection.saturation(0.1);
-            for (path, is_active) in prepaint.search_match_paths.iter() {
-                window.paint_path(path.clone(), secondary_selection);
-
-                if *is_active {
-                    window.paint_path(path.clone(), cx.theme().selection);
-                }
-            }
-
-            if let Some(path) = prepaint.selection_path.take() {
-                window.paint_path(path, cx.theme().selection);
-            }
-
-            // Paint hover highlight
-            if let Some(path) = prepaint.hover_highlight_path.take() {
-                window.paint_path(path, secondary_selection);
-            }
-        }
-
-        // Paint document colors
-        for (path, color) in prepaint.document_color_paths.iter() {
-            let color = if disabled { color.opacity(0.5) } else { *color };
-            window.paint_path(path.clone(), color);
-        }
-
-        // Paint text with inline completion ghost line support
-        let mut offset_y = invisible_top_padding;
-        let ghost_lines = &prepaint.ghost_lines;
-        let has_ghost_lines = !ghost_lines.is_empty();
-
-        // Keep scrollbar offset always be positive，Start from the left position
-        let scroll_offset = if text_align == TextAlign::Right {
-            (prepaint.scroll_size.width - prepaint.bounds.size.width).max(px(0.))
-        } else if text_align == TextAlign::Center {
-            (prepaint.scroll_size.width - prepaint.bounds.size.width)
-                .half()
-                .max(px(0.))
-        } else {
-            px(0.)
+        // Everything from here to the cursor is content that scrolls horizontally,
+        // so it must be clipped to the right of the gutter. Without the clip the
+        // scrolled-out text keeps painting under the line numbers, and is only
+        // hidden by the gutter quad below — which works when that quad is opaque
+        // and fails the moment a theme leaves `editor.gutter.background`
+        // transparent to let a gradient or image background through.
+        let content_mask = ContentMask {
+            bounds: Bounds::new(
+                point(
+                    input_bounds.origin.x + prepaint.last_layout.line_number_width,
+                    input_bounds.origin.y,
+                ),
+                size(
+                    (input_bounds.size.width - prepaint.last_layout.line_number_width).max(px(0.)),
+                    input_bounds.size.height,
+                ),
+            ),
         };
-
-        // Track the y-position of the cursor row for positioning the first line suffix
-        let mut cursor_row_y = None;
-
-        for (line, &buffer_line) in prepaint
-            .last_layout
-            .lines
-            .iter()
-            .zip(prepaint.last_layout.visible_buffer_lines.iter())
-        {
-            let row = buffer_line;
-            let line_y = origin.y + offset_y;
-            let p = point(
-                origin.x + prepaint.last_layout.line_number_width + (scroll_offset),
-                line_y,
-            );
-
-            // Paint the actual line
-            _ = line.paint(
-                p,
-                line_height,
-                text_align,
-                Some(prepaint.last_layout.content_width),
-                window,
-                cx,
-            );
-            offset_y += line.size(line_height).height;
-
-            if Some(row) == prepaint.current_row {
-                cursor_row_y = Some(line_y);
+        let cursor_row_y = window.with_content_mask(Some(content_mask), |window| {
+            // Paint indent guides
+            if let Some(path) = prepaint.indent_guides_path.take() {
+                window.paint_path(path, cx.theme().border.opacity(0.85));
             }
 
-            // After the cursor row, paint ghost lines (which shifts subsequent content down)
-            if has_ghost_lines && Some(row) == prepaint.current_row {
-                let ghost_x = origin.x + prepaint.last_layout.line_number_width;
+            // Paint selections
+            if window.is_window_active() {
+                let secondary_selection = cx.theme().selection.saturation(0.1);
+                for (path, is_active) in prepaint.search_match_paths.iter() {
+                    window.paint_path(path.clone(), secondary_selection);
 
-                for ghost_line in ghost_lines {
-                    let ghost_p = point(ghost_x, origin.y + offset_y);
+                    if *is_active {
+                        window.paint_path(path.clone(), cx.theme().selection);
+                    }
+                }
 
-                    // Paint semi-transparent background for ghost line
-                    let ghost_bounds = Bounds::new(
-                        ghost_p,
-                        size(
-                            bounds.size.width - prepaint.last_layout.line_number_width,
-                            line_height,
-                        ),
-                    );
-                    window.paint_quad(fill(ghost_bounds, editor_background));
+                if let Some(path) = prepaint.selection_path.take() {
+                    window.paint_path(path, cx.theme().selection);
+                }
 
-                    // Paint ghost line text
-                    _ = ghost_line.paint(
-                        ghost_p,
-                        line_height,
-                        text_align,
-                        Some(prepaint.last_layout.content_width),
-                        window,
-                        cx,
-                    );
-                    offset_y += line_height;
+                // Paint hover highlight
+                if let Some(path) = prepaint.hover_highlight_path.take() {
+                    window.paint_path(path, secondary_selection);
                 }
             }
-        }
 
-        // Paint blinking cursor
-        if focused && show_cursor {
-            if let Some(cursor_bounds) = prepaint.cursor_bounds_with_scroll() {
-                window.paint_quad(fill(cursor_bounds, cx.theme().caret));
+            // Paint document colors
+            for (path, color) in prepaint.document_color_paths.iter() {
+                let color = if disabled { color.opacity(0.5) } else { *color };
+                window.paint_path(path.clone(), color);
             }
-        }
+
+            // Paint text with inline completion ghost line support
+            let mut offset_y = invisible_top_padding;
+            let ghost_lines = &prepaint.ghost_lines;
+            let has_ghost_lines = !ghost_lines.is_empty();
+
+            // Keep scrollbar offset always be positive，Start from the left position
+            let scroll_offset = if text_align == TextAlign::Right {
+                (prepaint.scroll_size.width - prepaint.bounds.size.width).max(px(0.))
+            } else if text_align == TextAlign::Center {
+                (prepaint.scroll_size.width - prepaint.bounds.size.width)
+                    .half()
+                    .max(px(0.))
+            } else {
+                px(0.)
+            };
+
+            // Track the y-position of the cursor row for positioning the first line suffix
+            let mut cursor_row_y = None;
+
+            for (line, &buffer_line) in prepaint
+                .last_layout
+                .lines
+                .iter()
+                .zip(prepaint.last_layout.visible_buffer_lines.iter())
+            {
+                let row = buffer_line;
+                let line_y = origin.y + offset_y;
+                let p = point(
+                    origin.x + prepaint.last_layout.line_number_width + (scroll_offset),
+                    line_y,
+                );
+
+                // Paint the actual line
+                _ = line.paint(
+                    p,
+                    line_height,
+                    text_align,
+                    Some(prepaint.last_layout.content_width),
+                    window,
+                    cx,
+                );
+                offset_y += line.size(line_height).height;
+
+                if Some(row) == prepaint.current_row {
+                    cursor_row_y = Some(line_y);
+                }
+
+                // After the cursor row, paint ghost lines (which shifts subsequent content down)
+                if has_ghost_lines && Some(row) == prepaint.current_row {
+                    let ghost_x = origin.x + prepaint.last_layout.line_number_width;
+
+                    for ghost_line in ghost_lines {
+                        let ghost_p = point(ghost_x, origin.y + offset_y);
+
+                        // Paint semi-transparent background for ghost line
+                        let ghost_bounds = Bounds::new(
+                            ghost_p,
+                            size(
+                                bounds.size.width - prepaint.last_layout.line_number_width,
+                                line_height,
+                            ),
+                        );
+                        window.paint_quad(fill(ghost_bounds, editor_background));
+
+                        // Paint ghost line text
+                        _ = ghost_line.paint(
+                            ghost_p,
+                            line_height,
+                            text_align,
+                            Some(prepaint.last_layout.content_width),
+                            window,
+                            cx,
+                        );
+                        offset_y += line_height;
+                    }
+                }
+            }
+
+            // Paint blinking cursor
+            if focused && show_cursor {
+                if let Some(cursor_bounds) = prepaint.cursor_bounds_with_scroll() {
+                    window.paint_quad(fill(cursor_bounds, cx.theme().caret));
+                }
+            }
+
+            cursor_row_y
+        });
 
         // Paint line numbers
         let mut offset_y = px(0.);
@@ -2248,12 +2270,17 @@ impl Element for TextElement {
                     let first_line_x = cursor_bounds.origin.x + cursor_bounds.size.width;
                     let p = point(first_line_x, cursor_row_y);
 
-                    // Paint background to cover any existing text
-                    let bg_bounds = Bounds::new(p, size(first_line.width + px(4.), line_height));
-                    window.paint_quad(fill(bg_bounds, editor_background));
+                    // Same clip as the rest of the scrolling content: the suffix
+                    // trails the cursor and must not spill over the gutter.
+                    window.with_content_mask(Some(content_mask), |window| {
+                        // Paint background to cover any existing text
+                        let bg_bounds =
+                            Bounds::new(p, size(first_line.width + px(4.), line_height));
+                        window.paint_quad(fill(bg_bounds, editor_background));
 
-                    // Paint first line completion text
-                    _ = first_line.paint(p, line_height, text_align, None, window, cx);
+                        // Paint first line completion text
+                        _ = first_line.paint(p, line_height, text_align, None, window, cx);
+                    });
                 }
             }
         }
