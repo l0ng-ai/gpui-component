@@ -10,12 +10,13 @@ use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, Context,
     DismissEvent, Div, ElementId, Entity, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement, StyleRefinement,
-    Styled, Subscription, Window, div, prelude::FluentBuilder, px,
+    Styled, Subscription, Window, div, hsla, prelude::FluentBuilder, px,
 };
 
 use crate::{
     ActiveTheme as _, Edges, Icon, IconName, Sizable as _, StyledExt, TITLE_BAR_HEIGHT,
     animation::cubic_bezier,
+    box_shadow,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
@@ -31,12 +32,16 @@ pub enum NotificationType {
 
 impl NotificationType {
     fn icon(&self, cx: &App) -> Icon {
-        match self {
-            Self::Info => Icon::new(IconName::Info).text_color(cx.theme().info),
-            Self::Success => Icon::new(IconName::CircleCheck).text_color(cx.theme().success),
-            Self::Warning => Icon::new(IconName::TriangleAlert).text_color(cx.theme().warning),
-            Self::Error => Icon::new(IconName::CircleX).text_color(cx.theme().danger),
-        }
+        let (name, color) = match self {
+            Self::Info => (IconName::Info, cx.theme().info),
+            Self::Success => (IconName::CircleCheck, cx.theme().success),
+            Self::Warning => (IconName::TriangleAlert, cx.theme().warning),
+            Self::Error => (IconName::CircleX, cx.theme().danger),
+        };
+        // 14px rather than the default 16. A saturated status glyph is the
+        // loudest thing on a card that is otherwise all greys, and it only has
+        // to be legible — it does not have to announce itself.
+        Icon::new(name).text_color(color).size(px(14.))
     }
 }
 
@@ -324,18 +329,23 @@ impl Render for Notification {
             .group("")
             .occlude()
             .relative()
-            .w(px(380.))
+            .w(px(400.))
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().tokens.popover)
-            .rounded(cx.theme().radius_lg)
+            .rounded(px(12.))
             // A notification has no scrim under it — it lands straight on the
             // app, which in a light theme is the same near-white as its own
-            // background. `shadow_md` left it washed into the page with only a
-            // hairline border to separate the two.
-            .shadow_xl()
-            .py_3p5()
-            .px_4()
+            // background, so it has to lift off the page on its own. But a
+            // hard drop shadow reads as a dialog bolted on top of the UI. Two
+            // soft layers instead: a wide, faint one for the lift and a tight
+            // one to seat the edge.
+            .shadow(vec![
+                box_shadow(px(0.), px(8.), px(28.), px(-6.), hsla(0., 0., 0., 0.12)),
+                box_shadow(px(0.), px(2.), px(6.), px(-2.), hsla(0., 0., 0., 0.06)),
+            ])
+            .py_4()
+            .px(px(18.))
             .gap_3()
             .refine_style(&self.style)
             .when_some(icon, |this, icon| this.child(first_line_box().child(icon)))
@@ -344,8 +354,11 @@ impl Render for Notification {
                     .flex_1()
                     .overflow_hidden()
                     .gap_1()
+                    // Medium, not semibold. Bold black text is the right weight
+                    // for a heading in a document; on a three-line transient it
+                    // just shouts.
                     .when_some(self.title.clone(), |this, title| {
-                        this.child(div().text_sm().font_semibold().child(title))
+                        this.child(div().text_sm().font_medium().child(title))
                     })
                     // Muted, and set apart from the title. A title and a body in
                     // the same weight-adjacent ink, on adjacent lines, read as
