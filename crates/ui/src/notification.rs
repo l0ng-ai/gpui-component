@@ -323,6 +323,7 @@ impl Render for Notification {
             Some(type_) => Some(type_.icon(cx)),
         };
         let placement = cx.theme().notification.placement;
+        let dark = cx.theme().is_dark();
 
         h_flex()
             .id("notification")
@@ -330,20 +331,30 @@ impl Render for Notification {
             .occlude()
             .relative()
             .w(px(400.))
-            .border_1()
-            .border_color(cx.theme().border)
             .bg(cx.theme().tokens.popover)
             .rounded(px(12.))
-            // A notification has no scrim under it — it lands straight on the
-            // app, which in a light theme is the same near-white as its own
-            // background, so it has to lift off the page on its own. But a
-            // hard drop shadow reads as a dialog bolted on top of the UI. Two
-            // soft layers instead: a wide, faint one for the lift and a tight
-            // one to seat the edge.
-            .shadow(vec![
-                box_shadow(px(0.), px(8.), px(28.), px(-6.), hsla(0., 0., 0., 0.12)),
-                box_shadow(px(0.), px(2.), px(6.), px(-2.), hsla(0., 0., 0., 0.06)),
-            ])
+            // A drawn 1px border is what makes a floating card read as a web
+            // dialog rather than something the OS put on screen. In a light
+            // theme the edge comes from a hairline *shadow* instead — a spread
+            // with no blur, far fainter than a border, under the two soft
+            // layers that do the lifting.
+            //
+            // A dark theme keeps the real border: its surface is already close
+            // to the app behind it and a black shadow on a dark ground is
+            // invisible, so there would be nothing left to separate the two.
+            .when(dark, |this| this.border_1().border_color(cx.theme().border))
+            .shadow(if dark {
+                vec![
+                    box_shadow(px(0.), px(10.), px(30.), px(-8.), hsla(0., 0., 0., 0.55)),
+                    box_shadow(px(0.), px(3.), px(8.), px(-3.), hsla(0., 0., 0., 0.35)),
+                ]
+            } else {
+                vec![
+                    box_shadow(px(0.), px(0.), px(0.), px(1.), hsla(0., 0., 0., 0.05)),
+                    box_shadow(px(0.), px(10.), px(30.), px(-6.), hsla(0., 0., 0., 0.13)),
+                    box_shadow(px(0.), px(3.), px(8.), px(-3.), hsla(0., 0., 0., 0.07)),
+                ]
+            })
             .py_4()
             .px(px(18.))
             .gap_3()
@@ -360,19 +371,22 @@ impl Render for Notification {
                     .when_some(self.title.clone(), |this, title| {
                         this.child(div().text_sm().font_medium().child(title))
                     })
-                    // Muted, and set apart from the title. A title and a body in
-                    // the same weight-adjacent ink, on adjacent lines, read as
-                    // one run-on paragraph rather than a headline and its
-                    // detail.
+                    // Under a title, the message steps down a size as well as a
+                    // shade. Colour alone is a weak rank: two runs at the same
+                    // size on adjacent lines still read as one paragraph, just
+                    // one of them faded. Size is what says "this is the detail".
+                    //
+                    // Without a title the message *is* the text, so it keeps
+                    // full size and full contrast — shrinking and greying the
+                    // only thing on the card would be pure loss.
                     .when_some(self.message.clone(), |this, message| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .when(self.title.is_some(), |this| {
-                                    this.text_color(cx.theme().muted_foreground)
-                                })
+                        this.child(match self.title.is_some() {
+                            true => div()
+                                .text_size(px(13.))
+                                .text_color(cx.theme().muted_foreground)
                                 .child(message),
-                        )
+                            false => div().text_sm().child(message),
+                        })
                     })
                     .when_some(content, |this, content| this.child(content)),
             )
