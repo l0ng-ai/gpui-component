@@ -1131,14 +1131,22 @@ impl PopupMenu {
                 .border_b(px(1.))
                 .border_color(cx.theme().border.opacity(0.6))
                 .disabled(true),
-            PopupMenuItem::Label(label) => this.disabled(true).cursor_default().child(
-                h_flex()
-                    .cursor_default()
-                    .items_center()
-                    .gap_x_1()
-                    .children(Self::render_icon(has_left_icon, false, None, window, cx))
-                    .child(div().flex_1().child(label.clone())),
-            ),
+            PopupMenuItem::Label(label) => this
+                .disabled(true)
+                .cursor_default()
+                // A label carries no `item_height` the way a row does, so it is
+                // only as tall as its text and sits flush against whatever is
+                // next to it. Its own padding is what keeps a section heading
+                // off the row above and a trailing hint off the panel edge.
+                .py_1()
+                .child(
+                    h_flex()
+                        .cursor_default()
+                        .items_center()
+                        .gap_x_1()
+                        .children(Self::render_icon(has_left_icon, false, None, window, cx))
+                        .child(div().flex_1().child(label.clone())),
+                ),
             PopupMenuItem::ElementItem {
                 render,
                 icon,
@@ -1154,6 +1162,12 @@ impl PopupMenu {
                 .child(
                     h_flex()
                         .flex_1()
+                        // Without this the row is a flex child at its automatic
+                        // minimum — the width of its own content — so a custom
+                        // element that means to elide never gets the chance:
+                        // it grows past the panel's `max_w` and is clipped mid
+                        // glyph instead of ending in an ellipsis.
+                        .min_w_0()
                         .min_h(item_height)
                         .items_center()
                         .gap_x_1()
@@ -1336,12 +1350,21 @@ impl Render for PopupMenu {
             .text_color(cx.theme().popover_foreground)
             .relative()
             .occlude()
+            // The other half of the 5px inset below. The vertical half lives out
+            // here, outside the scrolling box, because a scroll container's
+            // padding counts towards its scrollable content but not towards its
+            // viewport: with `p(5.)` on the box itself the content measures
+            // exactly 10px taller than the container forever, so `Scrollbar`
+            // reads every menu as overflowing and paints a bar on menus that
+            // fit. Split this way the two agree, and only a menu that really is
+            // too tall gets one.
+            .py(px(5.))
             .child(
                 v_flex()
                     .id("items")
                     // 5px inset all around so the rounded selection pill floats
                     // clear of the panel edges, per the macOS Sonoma menu look.
-                    .p(px(5.))
+                    .px(px(5.))
                     .min_w(rems(8.))
                     .when_some(self.min_width, |this, min_width| this.min_w(min_width))
                     .max_w(max_width)
