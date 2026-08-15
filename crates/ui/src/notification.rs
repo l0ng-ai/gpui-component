@@ -324,12 +324,16 @@ impl Render for Notification {
             .group("")
             .occlude()
             .relative()
-            .w_112()
+            .w(px(380.))
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().tokens.popover)
             .rounded(cx.theme().radius_lg)
-            .shadow_md()
+            // A notification has no scrim under it — it lands straight on the
+            // app, which in a light theme is the same near-white as its own
+            // background. `shadow_md` left it washed into the page with only a
+            // hairline border to separate the two.
+            .shadow_xl()
             .py_3p5()
             .px_4()
             .gap_3()
@@ -339,11 +343,23 @@ impl Render for Notification {
                 v_flex()
                     .flex_1()
                     .overflow_hidden()
+                    .gap_1()
                     .when_some(self.title.clone(), |this, title| {
                         this.child(div().text_sm().font_semibold().child(title))
                     })
+                    // Muted, and set apart from the title. A title and a body in
+                    // the same weight-adjacent ink, on adjacent lines, read as
+                    // one run-on paragraph rather than a headline and its
+                    // detail.
                     .when_some(self.message.clone(), |this, message| {
-                        this.child(div().text_sm().child(message))
+                        this.child(
+                            div()
+                                .text_sm()
+                                .when(self.title.is_some(), |this| {
+                                    this.text_color(cx.theme().muted_foreground)
+                                })
+                                .child(message),
+                        )
                     })
                     .when_some(content, |this, content| this.child(content)),
             )
