@@ -158,9 +158,18 @@ pub trait StyledExt: Styled + Sized {
     }
 
     /// Render a border with a width of 1px, color ring color
+    ///
+    /// Held back off the full `ring`. That token is `neutral-950` on a light
+    /// theme and `neutral-300` on a dark one — near-black or near-white — so a
+    /// focused field drew the single highest-contrast line anywhere in the
+    /// window, several steps darker than the `border` it replaced and darker
+    /// than the text beside it. On a chrome built out of hairlines that reads
+    /// as an error state rather than as focus. At 0.5 the edge still clearly
+    /// changes on focus, from `border` grey to the ring's hue, without the
+    /// field jumping to the front of the window.
     #[inline]
     fn focused_border(self, cx: &App) -> Self {
-        self.border_1().border_color(cx.theme().ring)
+        self.border_1().border_color(cx.theme().ring.opacity(0.5))
     }
 
     font_weight!(font_thin, THIN);
@@ -532,11 +541,16 @@ impl<T: Styled> StyleSized<T> for T {
         .pb(padding.bottom)
     }
 
+    // A button's label is body text that happens to sit inside a control, so it
+    // rides the same ramp as everything around it: `text_sm` is the interface's
+    // body size and `text_xs` its secondary one. Medium and Large used to reach
+    // for `text_base`, a step *above* body — which put the label on a dialog's
+    // confirm button a size larger than the sentence it was confirming, and one
+    // size larger again than the same button rendered `.small()`.
     fn button_text_size(self, size: Size) -> Self {
         match size {
             Size::XSmall => self.text_xs(),
-            Size::Small => self.text_sm(),
-            _ => self.text_base(),
+            _ => self.text_sm(),
         }
     }
 }

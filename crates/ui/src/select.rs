@@ -461,7 +461,12 @@ where
         let bounds = self.state.bounds;
         let allow_open = !(self.state.open || self.state.disabled);
         let outline_visible = self.state.open || (is_focused && !self.state.disabled);
-        let popup_radius = cx.theme().radius.min(px(8.));
+        // 10px, the same literal `PopupMenu`'s panel uses: a dropdown *is* a
+        // menu, and at `radius.min(8)` the two sat a step apart wherever they
+        // appeared together. Not `radius`-derived for the same reason it is not
+        // there — the menu panel is deliberately a touch rounder than the
+        // app-wide radius, so deriving it would just reintroduce the gap.
+        let popup_radius = px(10.);
 
         let (bg, fg) = input_style(self.state.disabled, cx);
 
@@ -558,11 +563,23 @@ where
                                     v_flex()
                                         .occlude()
                                         .mt_1p5()
-                                        .bg(cx.theme().tokens.background)
+                                        // The same panel a right-click menu
+                                        // drops: `popover`, not `background`.
+                                        // Reaching for the window's own fill
+                                        // meant the one floating surface that
+                                        // did not sit on the popover tier —
+                                        // side by side with a context menu the
+                                        // two read as different materials, and
+                                        // on a translucent window it borrowed
+                                        // the terminal showing through behind
+                                        // it. Radius, shadow and the 5px inset
+                                        // follow `PopupMenu` for the same
+                                        // reason; see the panel there.
+                                        .bg(cx.theme().tokens.popover)
                                         .border_1()
                                         .border_color(cx.theme().border)
                                         .rounded(popup_radius)
-                                        .shadow_md()
+                                        .shadow_xl()
                                         .child(
                                             List::new(&self.state.list)
                                                 .when_some(
@@ -573,7 +590,7 @@ where
                                                 )
                                                 .with_size(self.state.size)
                                                 .max_h(self.state.menu_max_h)
-                                                .paddings(Edges::all(px(4.))),
+                                                .paddings(Edges::all(px(5.))),
                                         ),
                                 )
                                 .on_mouse_down_out(cx.listener(|this, _, window, cx| {

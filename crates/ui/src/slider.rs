@@ -453,11 +453,15 @@ impl Slider {
         div()
             .id(id)
             .absolute()
+            // Centred on the 4px rail: (RAIL - 16) / 2. Both this and the rail
+            // height below moved together — a thumb offset that does not match
+            // the rail leaves the knob riding a pixel high, which is only
+            // visible once you look for it and impossible to unsee after.
             .when(axis.is_horizontal(), |this| {
-                this.top(px(-5.)).left(start).ml(-px(8.))
+                this.top(px(-6.)).left(start).ml(-px(8.))
             })
             .when(axis.is_vertical(), |this| {
-                this.bottom(start).left(px(-5.)).mb(-px(8.))
+                this.bottom(start).left(px(-6.)).mb(-px(8.))
             })
             .flex()
             .items_center()
@@ -653,8 +657,13 @@ impl RenderOnce for Slider {
                         div()
                             .id("slider-bar")
                             .relative()
-                            .when(axis.is_horizontal(), |this| this.w_full().h_1p5())
-                            .when(axis.is_vertical(), |this| this.h_full().w_1p5())
+                            // 4px, not 6. The rail is a *track* the knob runs
+                            // along, and at 6px against a 16px knob it read as
+                            // a second filled control rather than as the groove
+                            // under one — heavier than every other hairline in
+                            // the window. See the thumb offset above.
+                            .when(axis.is_horizontal(), |this| this.w_full().h_1())
+                            .when(axis.is_vertical(), |this| this.h_full().w_1())
                             .bg(bar_color.opacity(0.2))
                             .active(|this| this.bg(bar_color.opacity(0.4)))
                             .corner_radii(radius)

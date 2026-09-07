@@ -229,12 +229,22 @@ impl RenderOnce for Kbd {
                     .bg(cx.theme().tokens.background)
             })
             .py_0p5()
-            .px_1()
+            // 6px, not 4. A key cap is a glyph in a box, and at 4px the box hugs
+            // a two-character stroke like `F5` tightly enough that the cap reads
+            // as a highlight rather than as a key. `min_w_5` already squares up
+            // the single-character case, so this only widens the ones that were
+            // actually cramped.
+            .px_1p5()
             .min_w_5()
             .text_center()
             .rounded(cx.theme().radius.half())
             .line_height(relative(1.))
             .text_xs()
+            // Key caps carry `muted_foreground` on `muted` — grey on grey, at
+            // the interface's smallest size. The extra weight is what keeps ⌘⇧
+            // legible there without pulling the cap up to body colour, which
+            // would make a shortcut hint compete with the label it belongs to.
+            .font_medium()
             .whitespace_normal()
             .flex_shrink_0()
             .refine_style(&self.style)

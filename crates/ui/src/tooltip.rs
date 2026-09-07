@@ -110,16 +110,27 @@ impl Render for Tooltip {
                 .m_3()
                 .bg(cx.theme().tokens.popover)
                 .text_color(cx.theme().popover_foreground)
-                .bg(cx.theme().tokens.popover)
                 .border_1()
-                .border_color(cx.theme().border)
-                .shadow_md()
-                .rounded(px(6.))
+                // A hairline, like the menu's separators: the tooltip already
+                // reads as a floating card from its shadow, and a full-strength
+                // `border` around a two-word label drew a box that was darker
+                // than the label inside it.
+                .border_color(cx.theme().border.opacity(0.6))
+                .shadow_lg()
+                // Follow the theme instead of pinning 6px. Every other floating
+                // surface in the window is on the theme radius or a touch over
+                // it (the menu panel is 10), so a tooltip stuck at 6 was the one
+                // corner that did not match — and on a square-cornered theme it
+                // stayed round.
+                .rounded(cx.theme().radius.min(px(8.)))
                 .justify_between()
-                .py_0p5()
-                .px_2()
+                // 2px above and below a 14px line left the text touching the
+                // border. 4/10 gives the label the same breathing room a menu
+                // row has.
+                .py_1()
+                .px_2p5()
                 .text_sm()
-                .gap_3()
+                .gap_2()
                 .refine_style(&self.style)
                 .map(|this| {
                     this.child(div().map(|this| match self.content {
