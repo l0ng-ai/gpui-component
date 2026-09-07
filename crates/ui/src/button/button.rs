@@ -9,9 +9,9 @@ use crate::{
 };
 use gpui::{
     AnyElement, App, Background, ClickEvent, Corners, Div, Edges, ElementId, Hsla,
-    InteractiveElement, Interactivity, IntoElement, MouseButton, ParentElement, Pixels, RenderOnce,
-    SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _, px, relative, transparent_white,
+    InteractiveElement, Interactivity, IntoElement, MouseButton, ParentElement, Pixels, Render,
+    RenderOnce, SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled,
+    Window, div, prelude::FluentBuilder as _, px, relative, transparent_white,
 };
 
 #[derive(Default, Clone, Copy)]
@@ -316,6 +316,23 @@ impl Button {
         self
     }
 
+    /// Set the tooltip of the button to a custom element.
+    ///
+    /// Takes precedence over [`Self::tooltip`] and [`Self::tooltip_with_action`].
+    /// Reach for it when the tooltip needs more than a line of text — a
+    /// [`crate::tooltip::Tooltip`] carrying a `key_binding`, say, so the
+    /// shortcut renders as a shortcut instead of being concatenated into the
+    /// label. The `tooltip_builder` this fills was already read in `render`;
+    /// until now nothing could set it.
+    pub fn tooltip_element<F, V>(mut self, builder: F) -> Self
+    where
+        F: Fn(&mut Window, &mut App) -> gpui::Entity<V> + 'static,
+        V: Render,
+    {
+        self.tooltip_builder = Some(Rc::new(move |window, cx| builder(window, cx).into()));
+        self
+    }
+
     /// Set true to show the loading indicator.
     pub fn loading(mut self, loading: bool) -> Self {
         self.loading = loading;
@@ -489,16 +506,27 @@ impl RenderOnce for Button {
                     }
                 } else {
                     // Normal Button
+                    //
+                    // The horizontal insets are a ladder off the 12px the
+                    // surrounding chrome uses as its content inset, not a
+                    // multiple of the button's own height: a medium button
+                    // padded to 16 sat wider than the panel it was in was
+                    // inset, so a row of buttons never lined up with the text
+                    // above it. 12/10/6 keeps each step readable while landing
+                    // the largest one on the same gutter as everything else.
                     match self.size {
                         Size::Size(size) => this.px(size * 0.2),
-                        Size::XSmall => this.h_5().px_1().when(self.compact, |this| this.min_w_5()),
+                        Size::XSmall => this
+                            .h_5()
+                            .px_1p5()
+                            .when(self.compact, |this| this.min_w_5()),
                         Size::Small => this
                             .h_6()
-                            .px_3()
+                            .px_2p5()
                             .when(self.compact, |this| this.min_w_6().px_1p5()),
                         _ => this
                             .h_8()
-                            .px_4()
+                            .px_3()
                             .when(self.compact, |this| this.min_w_8().px_2()),
                     }
                 }
