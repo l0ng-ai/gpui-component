@@ -883,7 +883,12 @@ impl Paragraph {
                         });
                     }
                     if style.code {
-                        highlight.background_color = Some(cx.theme().accent);
+                        highlight.background_color = Some(
+                            node_cx
+                                .style
+                                .inline_code_background
+                                .unwrap_or(cx.theme().accent),
+                        );
                     }
                     if let Some(color) = style.highlight {
                         highlight.background_color = Some(color);
@@ -997,7 +1002,12 @@ impl Paragraph {
                         });
                     }
                     if style.code {
-                        highlight.background_color = Some(cx.theme().accent);
+                        highlight.background_color = Some(
+                            node_cx
+                                .style
+                                .inline_code_background
+                                .unwrap_or(cx.theme().accent),
+                        );
                     }
                     if let Some(color) = style.highlight {
                         highlight.background_color = Some(color);

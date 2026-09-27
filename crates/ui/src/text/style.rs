@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{Pixels, Rems, StyleRefinement, px, rems};
+use gpui::{Hsla, Pixels, Rems, StyleRefinement, px, rems};
 
 use crate::highlighter::HighlightTheme;
 
@@ -28,6 +28,8 @@ pub struct TextViewStyle {
     pub table: StyleRefinement,
     /// Style refinement applied to each table cell.
     pub table_cell: StyleRefinement,
+    /// Fill behind inline `code` spans. `None` uses the theme's `accent`.
+    pub inline_code_background: Option<Hsla>,
     pub is_dark: bool,
 }
 
@@ -36,6 +38,7 @@ impl PartialEq for TextViewStyle {
         self.paragraph_gap == other.paragraph_gap
             && self.heading_base_font_size == other.heading_base_font_size
             && self.highlight_theme == other.highlight_theme
+            && self.inline_code_background == other.inline_code_background
     }
 }
 
@@ -49,6 +52,7 @@ impl Default for TextViewStyle {
             code_block: StyleRefinement::default(),
             table: StyleRefinement::default(),
             table_cell: StyleRefinement::default(),
+            inline_code_background: None,
             is_dark: false,
         }
     }
@@ -87,6 +91,14 @@ impl TextViewStyle {
     /// Set extra style for each table cell.
     pub fn table_cell(mut self, style: StyleRefinement) -> Self {
         self.table_cell = style;
+        self
+    }
+
+    /// Set the fill behind inline `code` spans, in place of the theme's
+    /// `accent` — which many themes also use for selection, so a code span
+    /// otherwise reads as selected text.
+    pub fn inline_code_background(mut self, color: Hsla) -> Self {
+        self.inline_code_background = Some(color);
         self
     }
 }
