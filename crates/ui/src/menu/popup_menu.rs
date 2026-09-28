@@ -10,7 +10,7 @@ use gpui::{
     ParentElement, Pixels, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
     WeakEntity, Window, anchored, div, prelude::FluentBuilder, px, rems,
 };
-use gpui::{ClickEvent, MouseDownEvent, OwnedMenuItem, Point, Subscription};
+use gpui::{ClickEvent, FontWeight, MouseDownEvent, OwnedMenuItem, Point, Subscription};
 
 use std::rc::Rc;
 
@@ -1087,14 +1087,15 @@ impl PopupMenu {
 
         let selected = self.selected_index == Some(ix);
         const EDGE_PADDING: Pixels = px(4.);
-        const INNER_PADDING: Pixels = px(8.);
+        const INNER_PADDING: Pixels = px(10.);
 
         let is_submenu = matches!(item, PopupMenuItem::Submenu { .. });
         let group_name = format!("{}:item-{}", cx.entity().entity_id(), ix);
 
+        // tty7 v5: 28px rows, the height of the app's own list rows.
         let item_height = match self.size {
             Size::Small => px(20.),
-            _ => px(26.),
+            _ => px(28.),
         };
 
         // macOS Sonoma menu language: the hovered/selected row paints a rounded
@@ -1106,7 +1107,7 @@ impl PopupMenu {
             .text_size(px(13.))
             .py_0()
             .px(INNER_PADDING)
-            .rounded(px(6.))
+            .rounded(px(7.))
             .items_center()
             .selected(selected)
             .on_hover(cx.listener(move |this, hovered, _, cx| {
@@ -1134,6 +1135,10 @@ impl PopupMenu {
             PopupMenuItem::Label(label) => this
                 .disabled(true)
                 .cursor_default()
+                // tty7 v5: a label is a section caption — a step under the
+                // rows, medium weight, in muted ink.
+                .text_size(px(11.5))
+                .font_weight(FontWeight::MEDIUM)
                 // A label carries no `item_height` the way a row does, so it is
                 // only as tall as its text and sits flush against whatever is
                 // next to it. Its own padding is what keeps a section heading
@@ -1345,8 +1350,19 @@ impl Render for PopupMenu {
             // radius and a floatier shadow. The fill stays fully opaque — GPUI
             // popups render in-window with no backdrop blur, and an unblurred
             // translucent panel just ghosts the terminal text through.
-            .rounded(px(10.))
-            .shadow_xl()
+            // tty7 v5: the popover's 12px corner, the same card corner the
+            // search and the switcher use.
+            .rounded(px(12.))
+            // tty7 v5: no drawn border — a one-device-pixel ring (0.5px on a
+            // Retina panel) in black at low alpha, and a long soft shadow
+            // under it. The 1px `border` line from `popover_style` read as a
+            // frame drawn around the menu rather than an edge.
+            .border(px(1. / window.scale_factor().max(1.)))
+            .border_color(match cx.theme().mode.is_dark() {
+                true => gpui::black().opacity(0.8),
+                false => gpui::black().opacity(0.14),
+            })
+            .shadow(v5_popover_shadow(cx.theme().mode.is_dark()))
             .text_color(cx.theme().popover_foreground)
             .relative()
             .occlude()
@@ -1358,13 +1374,13 @@ impl Render for PopupMenu {
             // reads every menu as overflowing and paints a bar on menus that
             // fit. Split this way the two agree, and only a menu that really is
             // too tall gets one.
-            .py(px(5.))
+            .py(px(6.))
             .child(
                 v_flex()
                     .id("items")
                     // 5px inset all around so the rounded selection pill floats
                     // clear of the panel edges, per the macOS Sonoma menu look.
-                    .px(px(5.))
+                    .px(px(6.))
                     .min_w(rems(8.))
                     .when_some(self.min_width, |this, min_width| this.min_w(min_width))
                     .max_w(max_width)
@@ -1387,5 +1403,30 @@ impl Render for PopupMenu {
                 // TODO: When the menu is limited by `overflow_y_scroll`, the sub-menu will cannot be displayed.
                 this.vertical_scrollbar(&self.scroll_handle)
             })
+    }
+}
+
+/// v5's `--pop-sh` minus its ring (drawn as the border): a long shadow that
+/// lifts the menu off the window, and in light mode a short one under it.
+fn v5_popover_shadow(dark: bool) -> Vec<gpui::BoxShadow> {
+    let long = gpui::BoxShadow {
+        color: gpui::black().opacity(if dark { 0.6 } else { 0.28 }),
+        offset: gpui::point(px(0.), px(24.)),
+        blur_radius: px(64.),
+        spread_radius: px(-12.),
+        inset: false,
+    };
+    match dark {
+        true => vec![long],
+        false => vec![
+            long,
+            gpui::BoxShadow {
+                color: gpui::black().opacity(0.06),
+                offset: gpui::point(px(0.), px(4.)),
+                blur_radius: px(12.),
+                spread_radius: px(0.),
+                inset: false,
+            },
+        ],
     }
 }

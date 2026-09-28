@@ -100,13 +100,16 @@ impl RenderOnce for MenuItemElement {
                 this.on_hover(move |hovered, window, cx| (on_hover)(hovered, window, cx))
             })
             .when(!self.disabled, |this| {
+                // tty7 v5: the row under the pointer is a neutral step of the
+                // popover (`list_hover`), not the accent — a menu row is where
+                // the pointer is, not a choice that has been made.
                 this.group_hover(self.group_name, |this| {
-                    this.bg(cx.theme().tokens.accent)
-                        .text_color(cx.theme().accent_foreground)
+                    this.bg(cx.theme().list_hover)
+                        .text_color(cx.theme().foreground)
                 })
                 .when(self.selected, |this| {
-                    this.bg(cx.theme().tokens.accent)
-                        .text_color(cx.theme().accent_foreground)
+                    this.bg(cx.theme().list_hover)
+                        .text_color(cx.theme().foreground)
                 })
                 .when_some(self.on_click, |this, on_click| {
                     this.on_mouse_down(MouseButton::Left, move |_, _, cx| {
