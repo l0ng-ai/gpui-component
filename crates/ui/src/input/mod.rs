@@ -14,6 +14,7 @@ mod lsp;
 mod mask_pattern;
 mod mode;
 mod movement;
+mod multi_selection;
 mod number_input;
 mod otp_input;
 pub(crate) mod popovers;
@@ -35,6 +36,9 @@ pub use input::*;
 pub use lsp::*;
 pub use lsp_types::Position;
 pub use mask_pattern::MaskPattern;
+pub use multi_selection::{
+    AddCursorAbove, AddCursorBelow, SelectAllOccurrences, SelectNextOccurrence,
+};
 pub use number_input::{NumberInput, NumberInputEvent, NumberStep, StepAction};
 pub use otp_input::*;
 pub use rope_ext::{InputEdit, Point, RopeExt, RopeLines};
