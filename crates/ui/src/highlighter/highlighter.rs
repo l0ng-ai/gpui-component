@@ -1,7 +1,9 @@
 use crate::highlighter::{HighlightTheme, LanguageRegistry};
+use crate::input::RopeExt as _;
 
 use anyhow::{Context, Result, anyhow};
 use gpui::{HighlightStyle, SharedString};
+use sum_tree::Bias;
 
 use ropey::{ChunkCursor, Rope};
 use std::sync::Arc;
@@ -916,6 +918,14 @@ impl SyntaxHighlighter {
             let node_range = &item.range;
             let name = &item.name;
 
+            // Snap to the current text's char boundaries. After a sync parse
+            // runs out of budget, the injection layers still hold byte ranges
+            // from before the edit, and one that lands inside a multi-byte
+            // character makes the text system split it — a panic, not a
+            // wrong colour.
+            let node_range = self.text.clip_offset(node_range.start, Bias::Left)
+                ..self.text.clip_offset(node_range.end, Bias::Right);
+
             // Avoid start larger than end
             let mut node_range = node_range.start.max(range.start)..node_range.end.min(range.end);
             if node_range.start > node_range.end {
@@ -1191,6 +1201,46 @@ mod tests {
                     color_name(right.1.color)
                 );
             }
+        }
+    }
+
+    /// A sync parse that runs out of budget keeps the old tree (edited) and
+    /// the old injection layers (not edited) against the new text. When the
+    /// edit grows a character — the IME committing pinyin `a` as `文` — the
+    /// layers' byte ranges land inside it, and a style boundary there makes
+    /// the text system split the line mid-character and panic.
+    #[test]
+    #[cfg(feature = "tree-sitter-languages")]
+    fn test_stale_styles_stay_on_char_boundaries() {
+        let old = "a **bold** b\n";
+        let mut highlighter = SyntaxHighlighter::new("markdown");
+        highlighter.update(None, &Rope::from_str(old), None);
+        assert!(
+            !highlighter.injection_layers.is_empty(),
+            "the paragraph should carry an inline injection layer"
+        );
+
+        // What `update` leaves behind when the parse times out.
+        let new = "文 **bold** b\n";
+        let edit = InputEdit {
+            start_byte: 0,
+            old_end_byte: 1,
+            new_end_byte: 3,
+            start_position: Point::new(0, 0),
+            old_end_position: Point::new(0, 1),
+            new_end_position: Point::new(0, 3),
+        };
+        let mut tree = highlighter.tree.take().unwrap();
+        tree.edit(&edit);
+        highlighter.tree = Some(tree);
+        highlighter.text = Rope::from_str(new);
+
+        let styles = highlighter.styles(&(0..new.len()), &HighlightTheme::default_dark());
+        for (range, _) in styles {
+            assert!(
+                new.is_char_boundary(range.start) && new.is_char_boundary(range.end),
+                "style range {range:?} splits a character of {new:?}"
+            );
         }
     }
 
