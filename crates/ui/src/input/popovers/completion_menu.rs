@@ -285,6 +285,13 @@ impl CompletionMenu {
         let mut range = self.trigger_start_offset.unwrap_or(self.offset)..self.offset;
 
         let editor = self.editor.clone();
+        // Everything below is measured against the text as it is now; the
+        // resolve can take a round trip to the server, and whatever is typed
+        // meanwhile is carried in through the editor's edit log.
+        let (version, snapshot) = {
+            let editor = self.editor.read(cx);
+            (editor.edit_version(), editor.text.clone())
+        };
 
         cx.spawn_in(window, async move |_, cx| {
             // An item that has not said which imports it needs may say so
@@ -309,27 +316,33 @@ impl CompletionMenu {
                     match text_edit {
                         CompletionTextEdit::Edit(edit) => {
                             new_text = edit.new_text.clone();
-                            range.start = editor.text.position_to_offset(&edit.range.start);
-                            range.end = editor.text.position_to_offset(&edit.range.end);
+                            range.start = snapshot.position_to_offset(&edit.range.start);
+                            range.end = snapshot.position_to_offset(&edit.range.end);
                         }
                         CompletionTextEdit::InsertAndReplace(edit) => {
                             new_text = edit.new_text.clone();
-                            range.start = editor.text.position_to_offset(&edit.replace.start);
-                            range.end = editor.text.position_to_offset(&edit.replace.end);
+                            range.start = snapshot.position_to_offset(&edit.replace.start);
+                            range.end = snapshot.position_to_offset(&edit.replace.end);
                         }
                     }
                 } else {
                     // No range of its own: it replaces the word being typed
                     // since the menu opened — not the trigger character
                     // (`.`, `::`) that opened it, which comes before.
-                    let end = editor.text.clip_offset(range.end, Bias::Left);
-                    let start = editor.text.clip_offset(range.start.min(end), Bias::Left);
-                    let typed = editor.text.slice(start..end).to_string();
+                    let end = snapshot.clip_offset(range.end, Bias::Left);
+                    let start = snapshot.clip_offset(range.start.min(end), Bias::Left);
+                    let typed = snapshot.slice(start..end).to_string();
                     range = word_start(&typed, start)..end;
                     if let Some(insert_text) = item.insert_text.clone() {
                         new_text = insert_text;
                     }
                 }
+                // Into today's text: the word's end takes in what was typed
+                // at it while the resolve was out.
+                let current = |editor: &InputState, r: Range<usize>| {
+                    editor.map_range_since(version, r.clone()).unwrap_or(r)
+                };
+                range = current(editor, range);
 
                 // The completion and its additional edits (an import at the
                 // top, say) are all written against the text as it is now:
@@ -340,9 +353,13 @@ impl CompletionMenu {
                     .iter()
                     .flatten()
                     .map(|e| {
-                        let start = editor.text.position_to_offset(&e.range.start);
-                        let end = editor.text.position_to_offset(&e.range.end).max(start);
-                        (start..end, e.new_text.clone())
+                        let start = snapshot.position_to_offset(&e.range.start);
+                        let end = snapshot.position_to_offset(&e.range.end).max(start);
+                        // An insertion (an import) stays a point: it must
+                        // not take in what was typed right at it.
+                        let r = current(editor, start..end);
+                        let r = if start == end { r.start..r.start } else { r };
+                        (r, e.new_text.clone())
                     })
                     .collect();
                 let has_extra = !additional.is_empty();
@@ -629,6 +646,91 @@ mod tests {
         let out = apply(text, &edits);
         assert_eq!(out, "use X;\nfn a() {}\nHashMap");
         assert_eq!(caret, out.len());
+    }
+
+    /// A provider whose resolve waits until the test answers it.
+    struct SlowResolve(std::cell::RefCell<Option<futures::channel::oneshot::Receiver<CompletionItem>>>);
+
+    impl crate::input::CompletionProvider for SlowResolve {
+        fn completions(
+            &self,
+            _: &ropey::Rope,
+            _: usize,
+            _: lsp_types::CompletionContext,
+            _: &mut Window,
+            _: &mut Context<InputState>,
+        ) -> gpui::Task<anyhow::Result<lsp_types::CompletionResponse>> {
+            gpui::Task::ready(Ok(lsp_types::CompletionResponse::Array(vec![])))
+        }
+
+        fn resolve_completion(
+            &self,
+            item: CompletionItem,
+            _: &ropey::Rope,
+            cx: &mut App,
+        ) -> gpui::Task<anyhow::Result<CompletionItem>> {
+            let rx = self.0.borrow_mut().take();
+            cx.background_spawn(async move {
+                Ok(match rx {
+                    Some(rx) => rx.await.unwrap_or(item),
+                    None => item,
+                })
+            })
+        }
+
+        fn is_completion_trigger(&self, _: usize, _: &str, _: &mut Context<InputState>) -> bool {
+            false
+        }
+    }
+
+    #[gpui::test]
+    fn text_typed_while_the_resolve_is_out_is_replaced_too(cx: &mut gpui::TestAppContext) {
+        use gpui::{EntityInputHandler as _, VisualTestContext};
+
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let mut editor = None;
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.set_global(crate::theme::Theme::default());
+                crate::input::init(cx);
+                let state = cx.new(|cx| {
+                    let mut state = InputState::new(window, cx)
+                        .code_editor("text")
+                        .default_value("fo");
+                    state.lsp.completion_provider =
+                        Some(Rc::new(SlowResolve(std::cell::RefCell::new(Some(rx)))));
+                    state
+                });
+                editor = Some(state.clone());
+                cx.new(|cx| crate::Root::new(state, window, cx))
+            })
+            .unwrap()
+        });
+        let editor = editor.unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+
+        let item = CompletionItem {
+            label: "foobar".into(),
+            ..Default::default()
+        };
+        cx.update(|window, cx| {
+            let menu = CompletionMenu::new(editor.clone(), window, cx);
+            menu.update(cx, |menu, cx| {
+                menu.offset = 2;
+                menu.trigger_start_offset = Some(0);
+                menu.select_item(&item, window, cx);
+            });
+            // Typed while the resolve is out.
+            editor.update(cx, |state, cx| {
+                state.replace_text_in_range(Some(2..2), "o", window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.read(cx).value()), "foo");
+
+        tx.send(item.clone()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| editor.read(cx).value()), "foobar");
     }
 
     #[test]
