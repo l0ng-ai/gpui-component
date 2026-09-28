@@ -263,8 +263,11 @@ impl CompletionMenu {
             _ = this.update(cx, |this, cx| {
                 this.list.update(cx, |list, cx| {
                     let delegate = list.delegate_mut();
+                    // Only into the very item asked about: the list is
+                    // rebuilt on every keystroke, and an answer measured
+                    // against older text must not land on its successor.
                     if let Some(slot) = delegate.items.get_mut(ix)
-                        && slot.label == resolved.label
+                        && Rc::ptr_eq(slot, &item)
                     {
                         *slot = Rc::new(resolved);
                     }
