@@ -1251,6 +1251,7 @@ impl InputState {
     ) {
         let position: Position = position.into();
         let offset = self.text.position_to_offset(&position);
+        self.clear_extra_selections();
         self.move_to(offset, None, cx);
         self.update_preferred_column();
     }
