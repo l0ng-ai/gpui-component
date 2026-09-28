@@ -31,7 +31,7 @@ impl InputState {
     }
 }
 
-struct TextSelector;
+pub(super) struct TextSelector;
 impl TextSelector {
     /// Select a line in the given text at the specified offset.
     ///

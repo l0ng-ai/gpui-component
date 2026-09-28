@@ -28,6 +28,7 @@ use super::{
     element::{EditorScrollbarSnapshot, TextElement},
     mask_pattern::{MaskPattern, normalize_number_input},
     mode::InputMode,
+    multi_selection::{ExtraSelection, MultiEdit},
     number_input,
     number_input::{NumberStep, StepAction},
 };
@@ -275,6 +276,7 @@ pub(crate) fn init(cx: &mut App) {
     ]);
 
     number_input::init(cx);
+    super::multi_selection::init(cx);
 }
 
 /// Whitespace indicators for rendering spaces and tabs.
@@ -350,6 +352,14 @@ pub struct InputState {
     /// - "Hello 世界💝" = 16
     /// - "💝" = 4
     pub(super) selected_range: Selection,
+    /// Cursors beyond the primary one (`selected_range`), for multi-cursor
+    /// editing. See [`Self::edit_each_selection`].
+    pub(super) extra_selections: Vec<ExtraSelection>,
+    /// Set while [`Self::edit_each_selection`] runs.
+    pub(super) multi_edit: Option<MultiEdit>,
+    /// Select-next-occurrence matches whole words only (it started from a
+    /// bare caret).
+    pub(super) occurrence_whole_word: bool,
     pub(super) search_panel: Option<Entity<SearchPanel>>,
     pub(super) searchable: bool,
     pub(super) replaceable: bool,
@@ -489,6 +499,9 @@ impl InputState {
             blink_cursor,
             history,
             selected_range: Selection::default(),
+            extra_selections: Vec::new(),
+            multi_edit: None,
+            occurrence_whole_word: false,
             search_panel: None,
             searchable: false,
             replaceable: true,
@@ -806,6 +819,7 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_extra_selections();
         self.history.ignore = true;
         self.emit_events = false;
         self.replace_text(value, window, cx);
@@ -1222,6 +1236,7 @@ impl InputState {
         let position: Position = position.into();
         let offset = self.text.position_to_offset(&position);
 
+        self.clear_extra_selections();
         self.move_to(offset, None, cx);
         self.update_preferred_column();
         self.focus(window, cx);
@@ -1273,6 +1288,7 @@ impl InputState {
     }
 
     pub(super) fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.clear_extra_selections();
         self.selected_range = (0..self.text.len()).into();
         cx.notify();
     }
@@ -1609,16 +1625,18 @@ impl InputState {
         let insert_newline = self.mode.is_multi_line() && (!self.submit_on_enter || action.shift);
 
         if insert_newline {
-            // Get current line indent
-            let indent = if self.mode.is_code_editor() {
-                self.indent_of_next_line()
-            } else {
-                "".to_string()
-            };
+            self.edit_each_selection(window, cx, |this, window, cx| {
+                // Get current line indent
+                let indent = if this.mode.is_code_editor() {
+                    this.indent_of_next_line()
+                } else {
+                    "".to_string()
+                };
 
-            // Add newline and indent
-            let new_line_text = format!("\n{}", indent);
-            self.replace_text_in_range_silent(None, &new_line_text, window, cx);
+                // Add newline and indent
+                let new_line_text = format!("\n{}", indent);
+                this.replace_text_in_range_silent(None, &new_line_text, window, cx);
+            });
             self.pause_blink_cursor(cx);
         } else {
             // Single line input or submit-on-enter: just emit the event
@@ -1633,6 +1651,7 @@ impl InputState {
     }
 
     pub(super) fn clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_extra_selections();
         self.replace_text("", window, cx);
         self.selected_range = (0..0).into();
         self.scroll_to(0, None, cx);
@@ -1647,6 +1666,11 @@ impl InputState {
         if self.has_inline_completion() {
             self.clear_inline_completion(cx);
             return; // Consume the escape, don't propagate
+        }
+
+        // With several cursors, Escape goes back to the primary one.
+        if self.ime_marked_range.is_none() && self.collapse_selections(cx) {
+            return;
         }
 
         if self.ime_marked_range.is_some() {
@@ -1673,6 +1697,7 @@ impl InputState {
         }
 
         if !self.selected_range.contains(offset) {
+            self.clear_extra_selections();
             self.move_to(offset, None, cx);
         }
 
@@ -1760,6 +1785,15 @@ impl InputState {
             return;
         }
 
+        // ⌥-click adds or removes a cursor; any other left click starts over
+        // from a single one.
+        if self.handle_alt_click(event, offset, cx) {
+            return;
+        }
+        if event.button == MouseButton::Left {
+            self.clear_extra_selections();
+        }
+
         // Triple click to select line
         if event.button == MouseButton::Left && event.click_count >= 3 {
             self.select_line(offset, window, cx);
@@ -1780,6 +1814,7 @@ impl InputState {
                 // A menu drawn by the host still acts on what was clicked:
                 // keep a selection the click landed in, otherwise put the
                 // caret there, as the built-in menu does.
+                self.clear_extra_selections();
                 self.move_to(offset, None, cx);
             }
             return;
@@ -2018,6 +2053,9 @@ impl InputState {
     }
 
     pub(super) fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if self.copy_selections(cx) {
+            return;
+        }
         if self.selected_range.is_empty() {
             return;
         }
@@ -2027,6 +2065,9 @@ impl InputState {
     }
 
     pub(super) fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cut_selections(window, cx) {
+            return;
+        }
         if self.selected_range.is_empty() {
             return;
         }
@@ -2044,6 +2085,9 @@ impl InputState {
                 new_text = new_text.replace('\n', "");
             }
 
+            if self.paste_at_selections(&new_text, window, cx) {
+                return;
+            }
             self.replace_text_in_range_silent(None, &new_text, window, cx);
             self.scroll_to(self.cursor(), None, cx);
         }
@@ -2064,6 +2108,7 @@ impl InputState {
     }
 
     pub(super) fn undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_extra_selections();
         self.history.ignore = true;
         if let Some(changes) = self.history.undo() {
             for change in changes {
@@ -2075,6 +2120,7 @@ impl InputState {
     }
 
     pub(super) fn redo(&mut self, _: &Redo, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_extra_selections();
         self.history.ignore = true;
         if let Some(changes) = self.history.redo() {
             for change in changes {
@@ -2810,6 +2856,15 @@ impl EntityInputHandler for InputState {
             return;
         }
 
+        // Typing with several cursors: the text goes in at each of them.
+        if !self.extra_selections.is_empty()
+            && self.multi_edit.is_none()
+            && !self.silent_replace_text
+        {
+            self.replace_text_at_each_selection(range_utf16, new_text, window, cx);
+            return;
+        }
+
         if self.blink_cursor.read(cx).visible() {
             self.pause_blink_cursor(cx);
         }
@@ -2870,7 +2925,12 @@ impl EntityInputHandler for InputState {
         } else {
             self.push_history(&old_text, &range, &new_text);
         }
-        self.history.end_grouping();
+        // All of one `edit_each_selection` run is a single undo step.
+        if self.multi_edit.is_some() {
+            self.history.start_grouping();
+        } else {
+            self.history.end_grouping();
+        }
         if let Some(diagnostics) = self.mode.diagnostics_mut() {
             diagnostics.reset(&self.text)
         }
@@ -2891,10 +2951,11 @@ impl EntityInputHandler for InputState {
         self.lsp.update(&self.text, window, cx);
         self.selected_range = (new_offset..new_offset).into();
         self.ime_marked_range.take();
+        self.record_edit_for_selections(&range, new_text.len());
         self.update_preferred_column();
         self.update_search(cx);
         self.mode.update_auto_grow(&self.display_map);
-        if !self.silent_replace_text {
+        if !self.silent_replace_text && self.multi_edit.is_none() {
             self.handle_completion_trigger(&range, &new_text, window, cx);
         }
         if self.emit_events {
@@ -2976,6 +3037,7 @@ impl EntityInputHandler for InputState {
                 .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len())
                 .into();
         }
+        self.record_edit_for_selections(&range, new_text.len());
         self.mode.update_auto_grow(&self.display_map);
         self.history.start_grouping();
         self.push_history(&old_text, &range, new_text);
