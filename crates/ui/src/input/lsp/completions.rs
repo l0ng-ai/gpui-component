@@ -1,5 +1,5 @@
 use anyhow::Result;
-use gpui::{Context, EntityInputHandler, Task, Window};
+use gpui::{App, Context, EntityInputHandler, Task, Window};
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionResponse, InlineCompletionContext,
     InlineCompletionItem, InlineCompletionResponse, InlineCompletionTriggerKind,
@@ -65,6 +65,23 @@ pub trait CompletionProvider {
     #[inline]
     fn inline_completion_debounce(&self) -> Duration {
         DEFAULT_INLINE_COMPLETION_DEBOUNCE
+    }
+
+    /// Fills in what a server leaves out of a completion until it is
+    /// looked at — its documentation, or the imports accepting it needs
+    /// (`additionalTextEdits`). Asked when an item is highlighted, and again
+    /// before one without additional edits is inserted.
+    ///
+    /// completionItem/resolve
+    ///
+    /// The default hands the item back as it is.
+    fn resolve_completion(
+        &self,
+        item: CompletionItem,
+        _text: &Rope,
+        _cx: &mut App,
+    ) -> Task<Result<CompletionItem>> {
+        Task::ready(Ok(item))
     }
 
     fn resolve_completions(

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
@@ -27,12 +29,15 @@ struct ContextMenuDelegate {
     menu: Entity<CompletionMenu>,
     items: Vec<Rc<CompletionItem>>,
     selected_ix: usize,
+    /// Items already sent to the provider's `resolve_completion`.
+    resolved: HashSet<usize>,
 }
 
 impl ContextMenuDelegate {
     fn set_items(&mut self, items: Vec<CompletionItem>) {
         self.items = items.into_iter().map(Rc::new).collect();
         self.selected_ix = 0;
+        self.resolved.clear();
     }
 
     fn selected_item(&self) -> Option<&Rc<CompletionItem>> {
@@ -153,6 +158,10 @@ impl ListDelegate for ContextMenuDelegate {
         cx: &mut Context<ListState<Self>>,
     ) {
         self.selected_ix = ix.map(|i| i.row).unwrap_or(0);
+        // Deferred: this runs inside the editor's own update (its arrow
+        // keys), and resolving reads the editor.
+        let menu = self.menu.clone();
+        cx.defer(move |cx| menu.update(cx, |menu, cx| menu.resolve_selected(cx)));
         cx.notify();
     }
 
@@ -196,6 +205,7 @@ impl CompletionMenu {
                 menu: view,
                 items: vec![],
                 selected_ix: 0,
+                resolved: HashSet::new(),
             };
 
             let list = cx.new(|cx| ListState::new(menu, window, cx));
@@ -225,14 +235,68 @@ impl CompletionMenu {
         })
     }
 
+    /// Asks the provider to fill in the highlighted item, once, and puts
+    /// the answer in its place — which shows its documentation.
+    fn resolve_selected(&mut self, cx: &mut Context<Self>) {
+        let (ix, item) = {
+            let delegate = self.list.read(cx).delegate();
+            let ix = delegate.selected_ix;
+            let Some(item) = delegate.items.get(ix).cloned() else {
+                return;
+            };
+            if delegate.resolved.contains(&ix) {
+                return;
+            }
+            (ix, item)
+        };
+        let Some(provider) = self.editor.read(cx).lsp.completion_provider.clone() else {
+            return;
+        };
+        self.list
+            .update(cx, |list, _| list.delegate_mut().resolved.insert(ix));
+        let text = self.editor.read(cx).text.clone();
+        let task = provider.resolve_completion((*item).clone(), &text, cx);
+        cx.spawn(async move |this, cx| {
+            let Ok(resolved) = task.await else {
+                return;
+            };
+            _ = this.update(cx, |this, cx| {
+                this.list.update(cx, |list, cx| {
+                    let delegate = list.delegate_mut();
+                    if let Some(slot) = delegate.items.get_mut(ix)
+                        && slot.label == resolved.label
+                    {
+                        *slot = Rc::new(resolved);
+                    }
+                    cx.notify();
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn select_item(&mut self, item: &CompletionItem, window: &mut Window, cx: &mut Context<Self>) {
-        let offset = self.offset;
         let item = item.clone();
         let mut range = self.trigger_start_offset.unwrap_or(self.offset)..self.offset;
 
         let editor = self.editor.clone();
 
         cx.spawn_in(window, async move |_, cx| {
+            // An item that has not said which imports it needs may say so
+            // once resolved; ask before inserting it.
+            let resolve = editor.update(cx, |editor, cx| {
+                if item.additional_text_edits.is_some() {
+                    return None;
+                }
+                let provider = editor.lsp.completion_provider.clone()?;
+                let text = editor.text.clone();
+                Some(provider.resolve_completion(item.clone(), &text, cx))
+            });
+            let item = match resolve {
+                Some(task) => task.await.unwrap_or(item),
+                None => item,
+            };
             editor.update_in(cx, |editor, window, cx| {
                 editor.completion_inserting = true;
 
@@ -251,16 +315,46 @@ impl CompletionMenu {
                         }
                     }
                 } else if let Some(insert_text) = item.insert_text.clone() {
+                    // Replaces what was typed since the menu opened, as the
+                    // label does, rather than going in after it.
                     new_text = insert_text;
-                    range = offset..offset;
                 }
 
-                editor.replace_text_in_range_silent(
-                    Some(editor.range_to_utf16(&range)),
-                    &new_text,
-                    window,
-                    cx,
-                );
+                // The completion and its additional edits (an import at the
+                // top, say) are all written against the text as it is now:
+                // applied from the end backwards, each leaves the others'
+                // offsets alone. The caret goes after the completion.
+                let mut edits: Vec<(Range<usize>, String)> = item
+                    .additional_text_edits
+                    .iter()
+                    .flatten()
+                    .map(|e| {
+                        let start = editor.text.position_to_offset(&e.range.start);
+                        let end = editor.text.position_to_offset(&e.range.end).max(start);
+                        (start..end, e.new_text.clone())
+                    })
+                    .filter(|(r, _)| r.end <= range.start || r.start >= range.end)
+                    .collect();
+                let shift: isize = edits
+                    .iter()
+                    .filter(|(r, _)| r.start < range.start)
+                    .map(|(r, t)| t.len() as isize - r.len() as isize)
+                    .sum();
+                let caret = (range.start as isize + new_text.len() as isize + shift).max(0) as usize;
+                let has_extra = !edits.is_empty();
+                edits.push((range.clone(), new_text.clone()));
+                edits.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
+                for (r, t) in edits {
+                    editor.replace_text_in_range_silent(
+                        Some(editor.range_to_utf16(&r)),
+                        &t,
+                        window,
+                        cx,
+                    );
+                }
+                if has_extra {
+                    editor.move_to(caret.min(editor.text.len()), None, cx);
+                }
                 editor.completion_inserting = false;
                 // FIXME: Input not get the focus
                 editor.focus(window, cx);
