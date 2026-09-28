@@ -187,6 +187,15 @@ impl Element for EditorScrollbar {
         window: &mut Window,
         cx: &mut App,
     ) {
+        // The overview ruler sits under the thumb, which is drawn over it.
+        if let Some(snapshot) = self.state.read(cx).editor_scrollbar_snapshot.get() {
+            self.state.read(cx).paint_overview_ruler(
+                snapshot.layout.bounds,
+                snapshot.layout.scroll_size.height,
+                window,
+                cx,
+            );
+        }
         if let Some(scrollbar) = prepaint.as_mut() {
             scrollbar.paint(window, cx);
         }
@@ -2126,6 +2135,10 @@ impl Element for TextElement {
                 strikethrough: None,
             }];
 
+            // Lines with an error or a warning carry its color in the gutter.
+            let problem_colors =
+                state.problem_line_number_colors(&last_layout.visible_range_offset, cx);
+
             // build line numbers
             for (line, &buffer_line) in last_layout
                 .lines
@@ -2135,7 +2148,14 @@ impl Element for TextElement {
                 let line_no: SharedString =
                     format!("{:>width$}", buffer_line + 1, width = line_number_len).into();
 
-                let runs = if current_row == Some(buffer_line)
+                let problem_runs;
+                let runs = if let Some(&color) = problem_colors.get(&buffer_line) {
+                    problem_runs = vec![TextRun {
+                        color,
+                        ..other_line_runs[0].clone()
+                    }];
+                    &problem_runs
+                } else if current_row == Some(buffer_line)
                     || extra_cursor_rows.binary_search(&buffer_line).is_ok()
                 {
                     &current_line_runs
