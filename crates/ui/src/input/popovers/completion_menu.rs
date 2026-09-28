@@ -324,7 +324,7 @@ impl CompletionMenu {
                 // top, say) are all written against the text as it is now:
                 // applied from the end backwards, each leaves the others'
                 // offsets alone. The caret goes after the completion.
-                let mut edits: Vec<(Range<usize>, String)> = item
+                let additional: Vec<(Range<usize>, String)> = item
                     .additional_text_edits
                     .iter()
                     .flatten()
@@ -333,17 +333,9 @@ impl CompletionMenu {
                         let end = editor.text.position_to_offset(&e.range.end).max(start);
                         (start..end, e.new_text.clone())
                     })
-                    .filter(|(r, _)| r.end <= range.start || r.start >= range.end)
                     .collect();
-                let shift: isize = edits
-                    .iter()
-                    .filter(|(r, _)| r.start < range.start)
-                    .map(|(r, t)| t.len() as isize - r.len() as isize)
-                    .sum();
-                let caret = (range.start as isize + new_text.len() as isize + shift).max(0) as usize;
-                let has_extra = !edits.is_empty();
-                edits.push((range.clone(), new_text.clone()));
-                edits.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
+                let has_extra = !additional.is_empty();
+                let (edits, caret) = plan_completion_edits(range.clone(), new_text, additional);
                 for (r, t) in edits {
                     editor.replace_text_in_range_silent(
                         Some(editor.range_to_utf16(&r)),
@@ -547,5 +539,70 @@ impl Render for CompletionMenu {
                 })),
         )
         .into_any_element()
+    }
+}
+
+/// The completion and its additional edits (an import at the top, say), all
+/// written against the text as it is now, in the order to apply them: from
+/// the end backwards, so each leaves the others' offsets alone. An edit that
+/// overlaps the completion is dropped. Also returns where the caret goes:
+/// after the completion.
+fn plan_completion_edits(
+    range: Range<usize>,
+    new_text: String,
+    additional: Vec<(Range<usize>, String)>,
+) -> (Vec<(Range<usize>, String)>, usize) {
+    let mut edits: Vec<(Range<usize>, String)> = additional
+        .into_iter()
+        .filter(|(r, _)| r.end <= range.start || r.start >= range.end)
+        .collect();
+    // Everything that lands before the completion moves it. An insert at the
+    // completion's own start goes in front of it — unless the completion is
+    // itself an insert there, which is applied first and ends up in front.
+    let shift: isize = edits
+        .iter()
+        .filter(|(r, _)| {
+            r.end <= range.start && !(r.start == range.start && r.is_empty() && range.is_empty())
+        })
+        .map(|(r, t)| t.len() as isize - r.len() as isize)
+        .sum();
+    let caret = (range.start as isize + new_text.len() as isize + shift).max(0) as usize;
+    edits.push((range, new_text));
+    // By start and then by end, both descending: an insert at the
+    // completion's start must go in after the completion replaced its range,
+    // or the completion would replace the inserted text instead.
+    edits.sort_by_key(|(r, _)| std::cmp::Reverse((r.start, r.end)));
+    (edits, caret)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn apply(text: &str, edits: &[(Range<usize>, String)]) -> String {
+        let mut text = text.to_string();
+        for (r, t) in edits {
+            text.replace_range(r.clone(), t);
+        }
+        text
+    }
+
+    #[test]
+    fn an_import_at_the_completions_own_start_does_not_eat_it() {
+        let (edits, caret) =
+            plan_completion_edits(0..3, "HashMap".into(), vec![(0..0, "use X;\n".into())]);
+        let out = apply("Has", &edits);
+        assert_eq!(out, "use X;\nHashMap");
+        assert_eq!(caret, out.len());
+    }
+
+    #[test]
+    fn an_import_above_moves_the_caret() {
+        let text = "fn a() {}\nHas";
+        let (edits, caret) =
+            plan_completion_edits(10..13, "HashMap".into(), vec![(0..0, "use X;\n".into())]);
+        let out = apply(text, &edits);
+        assert_eq!(out, "use X;\nfn a() {}\nHashMap");
+        assert_eq!(caret, out.len());
     }
 }
