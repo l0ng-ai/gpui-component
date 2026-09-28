@@ -439,6 +439,9 @@ pub struct InputState {
     /// A flag to indicate if we are currently inserting a completion item.
     pub(super) completion_inserting: bool,
     pub(super) hover_popover: Option<Entity<HoverPopover>>,
+    /// A popover the host keeps up while the cursor is in a call — a
+    /// language server's signature help. See [`Self::show_signature_help`].
+    signature_popover: Option<Entity<HoverPopover>>,
     /// The LSP definitions locations for "Go to Definition" feature.
     pub(super) hover_definition: HoverDefinition,
 
@@ -561,6 +564,7 @@ impl InputState {
             enable_context_menu: true,
             completion_inserting: false,
             hover_popover: None,
+            signature_popover: None,
             hover_definition: HoverDefinition::default(),
             silent_replace_text: false,
             emit_events: true,
@@ -1683,6 +1687,11 @@ impl InputState {
             return;
         }
 
+        if self.signature_popover.take().is_some() {
+            cx.notify();
+            return;
+        }
+
         // Clear inline completion on escape
         if self.has_inline_completion() {
             self.clear_inline_completion(cx);
@@ -2458,6 +2467,7 @@ impl InputState {
         // Because maybe user want to copy the selected text by AppMenuBar (will take focus handle).
 
         self.hover_popover = None;
+        self.signature_popover = None;
         self.diagnostic_popover = None;
         self.context_menu_content = None;
         self.clear_inline_completion(cx);
@@ -3006,7 +3016,11 @@ impl EntityInputHandler for InputState {
             self.history.end_grouping();
         }
         if let Some(diagnostics) = self.mode.diagnostics_mut() {
-            diagnostics.reset(&self.text)
+            if mask_changed {
+                diagnostics.reset(&self.text)
+            } else {
+                diagnostics.edit(&range, new_text.len(), &self.text)
+            }
         }
         // Adjust folds before updating wrap map: remove overlapping folds and shift others
         self.display_map
@@ -3089,7 +3103,7 @@ impl EntityInputHandler for InputState {
         }
 
         if let Some(diagnostics) = self.mode.diagnostics_mut() {
-            diagnostics.reset(&self.text)
+            diagnostics.edit(&range, new_text.len(), &self.text)
         }
         // Adjust folds before updating wrap map: remove overlapping folds and shift others
         self.display_map
@@ -3239,6 +3253,40 @@ impl Render for InputState {
             .children(self.diagnostic_popover.clone())
             .children(self.context_menu_content.as_ref().map(|menu| menu.render()))
             .children(self.hover_popover.clone())
+            .children(self.signature_popover.clone())
+    }
+}
+
+impl InputState {
+    /// Shows `markdown` in a popover at the byte `range` — the signature of
+    /// the call the cursor is in, say — until [`Self::hide_signature_help`],
+    /// Escape, or the editor losing focus. Replaces one already showing.
+    pub fn show_signature_help(
+        &mut self,
+        range: Range<usize>,
+        markdown: String,
+        cx: &mut Context<Self>,
+    ) {
+        let hover = lsp_types::Hover {
+            contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
+                kind: lsp_types::MarkupKind::Markdown,
+                value: markdown,
+            }),
+            range: None,
+        };
+        let editor = cx.entity();
+        self.signature_popover = Some(HoverPopover::new(editor, range, &hover, cx));
+        cx.notify();
+    }
+
+    pub fn hide_signature_help(&mut self, cx: &mut Context<Self>) {
+        if self.signature_popover.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub fn is_signature_help_visible(&self) -> bool {
+        self.signature_popover.is_some()
     }
 }
 
