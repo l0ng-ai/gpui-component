@@ -329,26 +329,10 @@ impl RenderOnce for Input {
                     .on_action(window.listener_for(&self.state, InputState::undo))
                     .on_action(window.listener_for(&self.state, InputState::redo))
                     .when(state.mode.is_multi_line(), |this| {
-                        this.on_action(each_selection(
-                            window,
-                            &self.state,
-                            InputState::indent_inline,
-                        ))
-                        .on_action(each_selection(
-                            window,
-                            &self.state,
-                            InputState::outdent_inline,
-                        ))
-                        .on_action(each_selection(
-                            window,
-                            &self.state,
-                            InputState::indent_block,
-                        ))
-                        .on_action(each_selection(
-                            window,
-                            &self.state,
-                            InputState::outdent_block,
-                        ))
+                        this.on_action(window.listener_for(&self.state, InputState::indent_inline))
+                            .on_action(window.listener_for(&self.state, InputState::outdent_inline))
+                            .on_action(window.listener_for(&self.state, InputState::indent_block))
+                            .on_action(window.listener_for(&self.state, InputState::outdent_block))
                     })
                     .on_action(
                         window.listener_for(&self.state, InputState::on_action_toggle_code_actions),
@@ -410,6 +394,11 @@ impl RenderOnce for Input {
                     .on_action(window.listener_for(&self.state, InputState::select_all_occurrences))
                     .on_action(window.listener_for(&self.state, InputState::add_cursor_above))
                     .on_action(window.listener_for(&self.state, InputState::add_cursor_below))
+                    .on_action(window.listener_for(&self.state, InputState::skip_occurrence))
+                    .on_action(window.listener_for(&self.state, InputState::column_select_up))
+                    .on_action(window.listener_for(&self.state, InputState::column_select_down))
+                    .on_action(window.listener_for(&self.state, InputState::column_select_left))
+                    .on_action(window.listener_for(&self.state, InputState::column_select_right))
                 });
 
                 result
@@ -473,6 +462,10 @@ impl RenderOnce for Input {
             )
             .on_mouse_down(
                 MouseButton::Right,
+                window.listener_for(&self.state, InputState::on_mouse_down),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
                 window.listener_for(&self.state, InputState::on_mouse_down),
             )
             .on_mouse_up(

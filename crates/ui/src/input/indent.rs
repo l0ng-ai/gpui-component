@@ -222,8 +222,11 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // First, try to accept inline completion if present
-        if self.accept_inline_completion(window, cx) {
+        // First, try to accept inline completion if present. It belongs to
+        // one caret; with several, Tab indents them all.
+        if self.has_extra_selections() {
+            self.clear_inline_completion(cx);
+        } else if self.accept_inline_completion(window, cx) {
             return;
         }
         self.indent(false, window, cx);
@@ -256,6 +259,20 @@ impl InputState {
             cx.propagate();
             return;
         };
+
+        // Several cursors: a line-wise indent touches each line once, however
+        // many selections share it; bare carets each get their own Tab.
+        if self.has_extra_selections() && self.multi_edit.is_none() {
+            let any_selected = self.selected_ranges().iter().any(|r| !r.is_empty());
+            if block || any_selected {
+                self.indent_selected_rows(false, window, cx);
+            } else {
+                self.edit_each_selection(window, cx, |this, window, cx| {
+                    this.indent(false, window, cx)
+                });
+            }
+            return;
+        }
 
         let tab_indent = self.mode.tab_size().to_string();
         let selected_range = self.selected_range;
@@ -307,6 +324,7 @@ impl InputState {
             self.selected_range =
                 (selected_range.start + added_len..selected_range.end + added_len).into();
         }
+        self.record_selections_after_edit();
     }
 
     pub(super) fn outdent(&mut self, block: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -314,6 +332,13 @@ impl InputState {
             cx.propagate();
             return;
         };
+
+        // Several cursors: each line any selection touches loses one level,
+        // once.
+        if self.has_extra_selections() && self.multi_edit.is_none() {
+            self.indent_selected_rows(true, window, cx);
+            return;
+        }
 
         let tab_indent = self.mode.tab_size().to_string();
         let selected_range = self.selected_range;
@@ -381,6 +406,7 @@ impl InputState {
                 self.selected_range = (new_offset..new_offset).into();
             }
         }
+        self.record_selections_after_edit();
     }
 }
 

@@ -43,7 +43,8 @@ pub use lsp::*;
 pub use lsp_types::Position;
 pub use mask_pattern::MaskPattern;
 pub use multi_selection::{
-    AddCursorAbove, AddCursorBelow, SelectAllOccurrences, SelectNextOccurrence,
+    AddCursorAbove, AddCursorBelow, ColumnSelectDown, ColumnSelectLeft, ColumnSelectRight,
+    ColumnSelectUp, SelectAllOccurrences, SelectNextOccurrence, SkipOccurrence,
 };
 pub use number_input::{NumberInput, NumberInputEvent, NumberStep, StepAction};
 pub use otp_input::*;

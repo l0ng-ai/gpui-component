@@ -361,6 +361,8 @@ pub struct InputState {
     /// Select-next-occurrence matches whole words only (it started from a
     /// bare caret).
     pub(super) occurrence_whole_word: bool,
+    /// The column (box) selection being built, if any.
+    pub(super) column_selection: Option<super::multi_selection::ColumnSelectionState>,
     pub(super) search_panel: Option<Entity<SearchPanel>>,
     pub(super) searchable: bool,
     pub(super) replaceable: bool,
@@ -506,6 +508,7 @@ impl InputState {
             extra_selections: Vec::new(),
             multi_edit: None,
             occurrence_whole_word: false,
+            column_selection: None,
             search_panel: None,
             searchable: false,
             replaceable: true,
@@ -1800,8 +1803,15 @@ impl InputState {
             return;
         }
 
-        // ⌥-click adds or removes a cursor; any other left click starts over
-        // from a single one.
+        // ⌥⇧-press / middle-press starts a column selection, ⌥-click adds or
+        // removes a cursor; any other left click starts over from a single one.
+        if self.handle_column_select_mouse_down(event, cx) {
+            return;
+        }
+        if event.button == MouseButton::Middle {
+            self.selecting = false;
+            return;
+        }
         if self.handle_alt_click(event, offset, cx) {
             return;
         }
@@ -2100,7 +2110,13 @@ impl InputState {
                 new_text = new_text.replace('\n', "");
             }
 
-            if self.paste_at_selections(&new_text, window, cx) {
+            let pieces = clipboard.entries().iter().find_map(|entry| match entry {
+                gpui::ClipboardEntry::String(s) => s
+                    .metadata_json::<super::multi_selection::MultiCursorClipboard>()
+                    .map(|m| m.pieces),
+                _ => None,
+            });
+            if self.paste_at_selections(&new_text, pieces, window, cx) {
                 return;
             }
             self.replace_text_in_range_silent(None, &new_text, window, cx);
@@ -2108,7 +2124,23 @@ impl InputState {
         }
     }
 
+    /// Push a change, with the cursors as they are (before the edit's own
+    /// selection update) as its "before".
     fn push_history(&mut self, text: &Rope, range: &Range<usize>, new_text: &str) {
+        if self.history.ignore {
+            return;
+        }
+        let before = self.selections_before_edit();
+        self.push_history_with(text, range, new_text, before);
+    }
+
+    fn push_history_with(
+        &mut self,
+        text: &Rope,
+        range: &Range<usize>,
+        new_text: &str,
+        selections_before: Option<super::multi_selection::SelectionSet>,
+    ) {
         if self.history.ignore {
             return;
         }
@@ -2118,30 +2150,45 @@ impl InputState {
         let old_text = text.slice(range.clone()).to_string();
         let new_range = range.start..range.start + new_text.len();
 
-        self.history
-            .push(Change::new(range, &old_text, new_range, new_text));
+        let mut change = Change::new(range, &old_text, new_range, new_text);
+        change.selections_before = selections_before;
+        self.history.push(change);
     }
 
     pub(super) fn undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
-        self.clear_extra_selections();
         self.history.ignore = true;
         if let Some(changes) = self.history.undo() {
-            for change in changes {
+            // One transaction: one Change event, and the cursors of the step's
+            // start come back — every one of them.
+            self.begin_multi_edit();
+            self.clear_extra_selections();
+            for change in changes.iter() {
                 let range_utf16 = self.range_to_utf16(&change.new_range.into());
                 self.replace_text_in_range_silent(Some(range_utf16), &change.old_text, window, cx);
             }
+            // Undone last-first, so the last is the step's first change.
+            if let Some(set) = changes.last().and_then(|c| c.selections_before.as_ref()) {
+                self.restore_selection_set(set);
+            }
+            self.end_multi_edit(cx);
         }
         self.history.ignore = false;
     }
 
     pub(super) fn redo(&mut self, _: &Redo, window: &mut Window, cx: &mut Context<Self>) {
-        self.clear_extra_selections();
         self.history.ignore = true;
         if let Some(changes) = self.history.redo() {
-            for change in changes {
+            self.begin_multi_edit();
+            self.clear_extra_selections();
+            for change in changes.iter() {
                 let range_utf16 = self.range_to_utf16(&change.old_range.into());
                 self.replace_text_in_range_silent(Some(range_utf16), &change.new_text, window, cx);
             }
+            // Redone first-first, so the last is the step's last change.
+            if let Some(set) = changes.last().and_then(|c| c.selections_after.as_ref()) {
+                self.restore_selection_set(set);
+            }
+            self.end_multi_edit(cx);
         }
         self.history.ignore = false;
     }
@@ -2483,6 +2530,10 @@ impl InputState {
         }
 
         if !self.focus_handle.is_focused(window) {
+            return;
+        }
+
+        if self.drag_column_selection(event.position, cx) {
             return;
         }
 
@@ -2973,6 +3024,7 @@ impl EntityInputHandler for InputState {
         self.selected_range = (new_offset..new_offset).into();
         self.ime_marked_range.take();
         self.record_edit_for_selections(&range, new_text.len());
+        self.record_selections_after_edit();
         self.update_preferred_column();
         self.update_search(cx);
         self.mode.update_auto_grow(&self.display_map);
@@ -2980,7 +3032,11 @@ impl EntityInputHandler for InputState {
             self.handle_completion_trigger(&range, &new_text, window, cx);
         }
         if self.emit_events {
-            cx.emit(InputEvent::Change);
+            // A multi-cursor transaction sends one for all its edits.
+            match self.multi_edit.as_mut() {
+                Some(multi_edit) => multi_edit.changed = true,
+                None => cx.emit(InputEvent::Change),
+            }
         }
         cx.notify();
     }
@@ -2999,6 +3055,7 @@ impl EntityInputHandler for InputState {
         }
 
         self.lsp.reset();
+        let selections_before = self.selections_before_edit();
 
         // See the same NOTE in `replace_text_in_range`.
         let new_text = self.normalize_input(new_text);
@@ -3062,7 +3119,7 @@ impl EntityInputHandler for InputState {
         self.record_edit_for_selections(&range, new_text.len());
         self.mode.update_auto_grow(&self.display_map);
         self.history.start_grouping();
-        self.push_history(&old_text, &range, new_text);
+        self.push_history_with(&old_text, &range, new_text, selections_before);
         cx.notify();
     }
 

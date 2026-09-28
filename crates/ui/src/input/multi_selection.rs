@@ -38,6 +38,17 @@ actions!(
         AddCursorAbove,
         /// Add a cursor on the line below the bottommost cursor.
         AddCursorBelow,
+        /// Drop the newest selection and select the next occurrence instead
+        /// (VS Code's ⌘K ⌘D).
+        SkipOccurrence,
+        /// Grow the column (box) selection a row up (VS Code's ⌥⇧⌘↑).
+        ColumnSelectUp,
+        /// Grow the column (box) selection a row down (VS Code's ⌥⇧⌘↓).
+        ColumnSelectDown,
+        /// Move the column selection's moving edge a column left (⌥⇧⌘←).
+        ColumnSelectLeft,
+        /// Move the column selection's moving edge a column right (⌥⇧⌘→).
+        ColumnSelectRight,
     ]
 );
 
@@ -47,7 +58,46 @@ pub(super) fn init(cx: &mut App) {
         KeyBinding::new("secondary-shift-l", SelectAllOccurrences, Some(CONTEXT)),
         KeyBinding::new("secondary-alt-up", AddCursorAbove, Some(CONTEXT)),
         KeyBinding::new("secondary-alt-down", AddCursorBelow, Some(CONTEXT)),
+        // A chord: only in the code editor, so ⌘K alone keeps its meaning in
+        // every other field.
+        KeyBinding::new(
+            "secondary-k secondary-d",
+            SkipOccurrence,
+            Some(super::editing::CODE_EDITOR_CONTEXT),
+        ),
+        KeyBinding::new("secondary-alt-shift-up", ColumnSelectUp, Some(CONTEXT)),
+        KeyBinding::new("secondary-alt-shift-down", ColumnSelectDown, Some(CONTEXT)),
+        KeyBinding::new("secondary-alt-shift-left", ColumnSelectLeft, Some(CONTEXT)),
+        KeyBinding::new(
+            "secondary-alt-shift-right",
+            ColumnSelectRight,
+            Some(CONTEXT),
+        ),
     ]);
+}
+
+/// A column (box) selection: the rectangle from the anchor corner to the
+/// head corner, one selection per row. X is in content coordinates — from
+/// the text's left edge, unaffected by scrolling.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ColumnSelection {
+    anchor_row: usize,
+    anchor_x: Pixels,
+    head_row: usize,
+    head_x: Pixels,
+    /// The width of one column, for rows that aren't laid out and for the
+    /// keyboard's left/right steps.
+    em: Pixels,
+}
+
+/// The column selection being built, with the ranges it last produced: once
+/// the selections are anything else, it's over.
+#[derive(Debug, Clone)]
+pub(crate) struct ColumnSelectionState {
+    pub(crate) selection: ColumnSelection,
+    produced: Vec<Range<usize>>,
+    /// A mouse drag is extending it.
+    pub(crate) dragging: bool,
 }
 
 /// A selection other than the primary one.
@@ -89,7 +139,16 @@ pub(super) fn each_selection<A: 'static>(
     window.listener_for(state, InputState::each_selection(handler))
 }
 
-/// Bookkeeping for one [`InputState::edit_each_selection`] run.
+/// Every cursor at one moment, sorted and merged: what undo and redo put
+/// back.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SelectionSet {
+    pub(crate) selections: Vec<ExtraSelection>,
+    pub(crate) primary: usize,
+}
+
+/// Bookkeeping for one multi-cursor transaction: an
+/// [`InputState::edit_each_selection`] run, a line-wise indent, an undo.
 #[derive(Debug, Default)]
 pub(crate) struct MultiEdit {
     /// The pass currently running is the primary selection's.
@@ -97,6 +156,12 @@ pub(crate) struct MultiEdit {
     /// Every edit the current pass made, as `(replaced range, inserted len)`
     /// in the order they were applied.
     pub(crate) edits: Vec<(Range<usize>, usize)>,
+    /// The cursors when the transaction began, for its undo step.
+    pub(crate) before: Option<SelectionSet>,
+    /// A change went onto the undo stack.
+    pub(crate) pushed: bool,
+    /// The text changed: one `InputEvent::Change` is owed at the end.
+    pub(crate) changed: bool,
 }
 
 /// Map a byte offset through an edit that replaced `range` with `new_len`
@@ -198,8 +263,18 @@ pub(crate) fn find_next_occurrence(
         .cloned()
 }
 
+/// What a multi-cursor copy puts on the clipboard beside the text: each
+/// selection's own text, in document order.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct MultiCursorClipboard {
+    pub(crate) pieces: Vec<String>,
+}
+
 /// Split a paste into one piece per selection, the way VS Code does: only
 /// when the clipboard holds exactly as many lines as there are selections.
+/// One trailing line break ends the last line rather than starting another,
+/// so `"a\nb\n"` — the shape copied whole lines have — is two lines, not
+/// three with an empty one.
 pub(crate) fn distribute_paste(text: &str, count: usize) -> Option<Vec<String>> {
     if count < 2 {
         return None;
@@ -340,9 +415,9 @@ impl InputState {
             return;
         }
 
+        self.begin_multi_edit();
         let (mut selections, primary) = self.take_all_selections();
         let mut ime = self.ime_marked_range.take();
-        self.multi_edit = Some(MultiEdit::default());
 
         for ix in (0..selections.len()).rev() {
             let is_primary = ix == primary;
@@ -391,11 +466,99 @@ impl InputState {
             };
         }
 
-        self.multi_edit = None;
-        self.history.end_grouping();
         self.set_all_selections(selections, primary);
         self.ime_marked_range = ime;
+        self.end_multi_edit(cx);
         cx.notify();
+    }
+
+    /// Open a transaction: until [`Self::end_multi_edit`], every edit joins
+    /// one undo step whose "before" is the cursors now, edits are recorded
+    /// instead of shifting the extra cursors, and `InputEvent::Change` waits.
+    pub(super) fn begin_multi_edit(&mut self) {
+        self.multi_edit = Some(MultiEdit {
+            before: Some(self.selection_set()),
+            ..Default::default()
+        });
+    }
+
+    /// Close the transaction [`Self::begin_multi_edit`] opened, once the
+    /// cursors are where the command leaves them: they become the step's
+    /// "after", and a single `InputEvent::Change` goes out if the text changed.
+    pub(super) fn end_multi_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(multi_edit) = self.multi_edit.take() else {
+            return;
+        };
+        self.history.end_grouping();
+        if multi_edit.pushed {
+            self.record_selections_after_edit();
+        }
+        if multi_edit.changed && self.emit_events {
+            cx.emit(super::InputEvent::Change);
+        }
+    }
+
+    /// The "before" for a change about to go onto the undo stack.
+    pub(super) fn selections_before_edit(&mut self) -> Option<SelectionSet> {
+        match self.multi_edit.as_mut() {
+            Some(multi_edit) => {
+                multi_edit.pushed = true;
+                multi_edit.before.clone()
+            }
+            None => Some(self.selection_set()),
+        }
+    }
+
+    /// Store the cursors as they are now as the latest undo step's "after".
+    /// Commands that place the cursors themselves after editing call this;
+    /// inside a transaction the transaction's end does.
+    pub(crate) fn record_selections_after_edit(&mut self) {
+        if self.history.ignore || self.multi_edit.is_some() {
+            return;
+        }
+        let set = self.selection_set();
+        if let Some(change) = self.history.last_undo_mut() {
+            change.selections_after = Some(set);
+        }
+    }
+
+    /// Every cursor as it is now.
+    pub(crate) fn selection_set(&self) -> SelectionSet {
+        let mut all = self.extra_selections.clone();
+        all.push(ExtraSelection {
+            range: self.selected_range,
+            reversed: self.selection_reversed,
+            preferred_column: self.preferred_column,
+        });
+        let primary = all.len() - 1;
+        let (selections, primary) = merge_selections(all, primary);
+        SelectionSet {
+            selections,
+            primary,
+        }
+    }
+
+    /// Put the cursors of `set` back (undo / redo).
+    pub(super) fn restore_selection_set(&mut self, set: &SelectionSet) {
+        let len = self.text.len();
+        let selections = set
+            .selections
+            .iter()
+            .map(|s| {
+                let start = self
+                    .text
+                    .clip_offset(s.range.start.min(len), sum_tree::Bias::Left);
+                let end = self
+                    .text
+                    .clip_offset(s.range.end.min(len), sum_tree::Bias::Right);
+                ExtraSelection {
+                    range: (start.min(end)..end.max(start)).into(),
+                    ..*s
+                }
+            })
+            .collect();
+        self.set_all_selections(selections, set.primary);
+        self.selected_word_range = None;
     }
 
     /// Every selection, primary included, sorted, with the primary's index.
@@ -503,11 +666,15 @@ impl InputState {
         let texts: Vec<String> = self
             .selected_ranges()
             .into_iter()
-            .filter(|r| !r.is_empty())
             .map(|r| self.text.slice(r).to_string())
             .collect();
-        if !texts.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(texts.join("\n")));
+        if texts.iter().any(|t| !t.is_empty()) {
+            // The pieces ride along, so a paste at as many cursors hands each
+            // its own even when a piece spans lines.
+            cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(
+                texts.join("\n"),
+                MultiCursorClipboard { pieces: texts },
+            ));
         }
         true
     }
@@ -525,18 +692,23 @@ impl InputState {
         true
     }
 
-    /// Paste with several selections: one clipboard line per selection when
-    /// the counts match, the whole clipboard at each otherwise.
+    /// Paste with several selections: each gets its own piece when a
+    /// multi-cursor copy made as many, or one clipboard line each when the
+    /// line count matches; otherwise the whole clipboard goes in at each.
     pub(super) fn paste_at_selections(
         &mut self,
         text: &str,
+        pieces: Option<Vec<String>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.extra_selections.is_empty() {
             return false;
         }
-        let pieces = distribute_paste(text, self.selection_count());
+        let count = self.selection_count();
+        let pieces = pieces
+            .filter(|p| p.len() == count && p.join("\n") == text)
+            .or_else(|| distribute_paste(text, count));
         self.edit_each_selection_indexed(window, cx, |this, ix, window, cx| {
             let piece = pieces.as_ref().map_or(text, |p| p[ix].as_str());
             this.replace_text_in_range_silent(None, piece, window, cx);
@@ -788,6 +960,398 @@ impl InputState {
     }
 }
 
+impl InputState {
+    /// Indent (`outdent: false`) or outdent every row any selection touches,
+    /// each row once however many selections share it, as one undo step.
+    pub(super) fn indent_selected_rows(
+        &mut self,
+        outdent: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = self.mode.tab_size();
+        let tab_indent = tab.to_string();
+
+        self.begin_multi_edit();
+        let (mut selections, primary) = self.take_all_selections();
+        let rows: std::collections::BTreeSet<usize> = selections
+            .iter()
+            .flat_map(|s| super::editing::selected_rows(&self.text, &s.range.into()))
+            .collect();
+
+        for row in rows.into_iter().rev() {
+            let line_start = self.text.line_start_offset(row);
+            let (range, new_text) = if outdent {
+                let line = self.text.slice_line(row);
+                let removable = if line.chars().next() == Some('\t') {
+                    1
+                } else {
+                    line.chars()
+                        .take(tab.tab_size)
+                        .take_while(|c| *c == ' ')
+                        .count()
+                };
+                if removable == 0 {
+                    continue;
+                }
+                (line_start..line_start + removable, "")
+            } else {
+                (line_start..line_start, tab_indent.as_ref())
+            };
+
+            let range_utf16 = self.range_to_utf16(&range);
+            self.replace_text_in_range_silent(Some(range_utf16), new_text, window, cx);
+
+            let new_len = new_text.len();
+            for sel in selections.iter_mut() {
+                let is_caret = sel.range.is_empty();
+                let map = |offset: usize| {
+                    // A caret at the line start rides the new indent; a
+                    // selection that starts there takes the indent in.
+                    if is_caret && offset == range.start && new_len > 0 {
+                        offset + new_len
+                    } else {
+                        map_offset(offset, &range, new_len)
+                    }
+                };
+                sel.range = (map(sel.range.start)..map(sel.range.end)).into();
+            }
+        }
+        if let Some(multi_edit) = self.multi_edit.as_mut() {
+            multi_edit.edits.clear();
+        }
+
+        self.set_all_selections(selections, primary);
+        self.update_preferred_column();
+        self.end_multi_edit(cx);
+        self.pause_blink_cursor(cx);
+        cx.notify();
+    }
+
+    pub(super) fn skip_occurrence(
+        &mut self,
+        _: &SkipOccurrence,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            self.select_next_occurrence(&SelectNextOccurrence, window, cx);
+            return;
+        }
+
+        let needle = self.text.slice(self.selected_range).to_string();
+        let text = self.text.to_string();
+        if self.extra_selections.is_empty() {
+            self.occurrence_whole_word =
+                self.occurrence_whole_word && is_whole_word(&text, &self.selected_range.into());
+        }
+        let current: Range<usize> = self.selected_range.into();
+        let taken: Vec<Range<usize>> = self
+            .selected_ranges()
+            .into_iter()
+            .filter(|r| *r != current)
+            .collect();
+        let Some(next) = find_next_occurrence(
+            &text,
+            &needle,
+            current.end,
+            self.occurrence_whole_word,
+            &taken,
+        ) else {
+            return;
+        };
+        if next == current {
+            return;
+        }
+
+        let mut all = std::mem::take(&mut self.extra_selections);
+        all.push(ExtraSelection::new(next.clone(), false));
+        let primary = all.len() - 1;
+        self.set_all_selections(all, primary);
+        self.update_preferred_column();
+        self.scroll_to(next.end, None, cx);
+        self.pause_blink_cursor(cx);
+        cx.notify();
+    }
+
+    /// The width of one column: the first laid-out character's advance.
+    fn column_width(&self) -> Pixels {
+        let Some(last_layout) = self.last_layout.as_ref() else {
+            return Pixels::ZERO;
+        };
+        for (line, start) in last_layout
+            .lines
+            .iter()
+            .zip(last_layout.visible_line_byte_offsets.iter())
+        {
+            let Some(c) = self.text.slice(*start..self.text.len()).chars().next() else {
+                continue;
+            };
+            if c == '\n' || c == '\r' || c == '\t' {
+                continue;
+            }
+            if let Some(pos) = line.position_for_index(c.len_utf8(), last_layout, false)
+                && pos.y == Pixels::ZERO
+                && pos.x > Pixels::ZERO
+            {
+                return pos.x;
+            }
+        }
+        last_layout.line_height * 0.6
+    }
+
+    /// X of `offset` in content coordinates, on its row's first visual line.
+    fn x_for_offset(&self, offset: usize, em: Pixels) -> Pixels {
+        let point = self.text.offset_to_point(offset);
+        if let Some(last_layout) = self.last_layout.as_ref()
+            && let Some(line) = last_layout.line(point.row)
+            && let Some(pos) = line.position_for_index(point.column, last_layout, false)
+        {
+            return pos.x;
+        }
+        let line_start = self.text.line_start_offset(point.row);
+        em * self.text.slice(line_start..offset).chars().count() as f32
+    }
+
+    /// The offset at `x` on `row`, and whether the row reaches that far.
+    fn offset_for_row_x(&self, row: usize, x: Pixels, em: Pixels) -> (usize, bool) {
+        let line_start = self.text.line_start_offset(row);
+        let line_end = self.text.line_end_offset(row);
+        if let Some(last_layout) = self.last_layout.as_ref()
+            && let Some(line) = last_layout.line(row)
+        {
+            let ix = line
+                .closest_index_for_x(x, last_layout)
+                .min(line_end - line_start);
+            let end_x = line
+                .position_for_index(line_end - line_start, last_layout, true)
+                .map(|p| p.x)
+                .unwrap_or_default();
+            return (line_start + ix, x <= end_x + em / 2.);
+        }
+        let column = (x / em).round().max(0.) as usize;
+        let line = self.text.slice(line_start..line_end);
+        let chars = line.chars().count();
+        let bytes: usize = line.chars().take(column).map(|c| c.len_utf8()).sum();
+        (line_start + bytes, column <= chars)
+    }
+
+    /// Make the selections the rows of `column`.
+    fn apply_column_selection(&mut self, column: ColumnSelection, dragging: bool) {
+        let (top, bottom) = if column.anchor_row <= column.head_row {
+            (column.anchor_row, column.head_row)
+        } else {
+            (column.head_row, column.anchor_row)
+        };
+        let left = column.anchor_x.min(column.head_x);
+        let reversed = column.head_x < column.anchor_x;
+
+        let mut all = vec![];
+        let mut primary = None;
+        for row in top..=bottom {
+            if row != column.head_row && self.display_map.is_buffer_line_hidden(row) {
+                continue;
+            }
+            let (a, a_reached) = self.offset_for_row_x(row, column.anchor_x, column.em);
+            let (h, h_reached) = self.offset_for_row_x(row, column.head_x, column.em);
+            let reaches = if left == column.anchor_x {
+                a_reached
+            } else {
+                h_reached
+            };
+            // Lines too short to reach the box stay out of it, like VS Code;
+            // the head's row keeps its caret so there's always a primary.
+            if !reaches && row != column.head_row {
+                continue;
+            }
+            if row == column.head_row {
+                primary = Some(all.len());
+            }
+            all.push(ExtraSelection::new(a.min(h)..a.max(h), reversed && a != h));
+        }
+        let Some(primary) = primary else {
+            return;
+        };
+        self.set_all_selections(all, primary);
+        self.update_preferred_column();
+        self.column_selection = Some(ColumnSelectionState {
+            selection: column,
+            produced: self.selected_ranges(),
+            dragging,
+        });
+    }
+
+    /// The column selection to extend: the one in progress, or a fresh one
+    /// from the primary selection's corners.
+    fn current_column_selection(&self) -> ColumnSelection {
+        if let Some(state) = self.column_selection.as_ref()
+            && state.produced == self.selected_ranges()
+        {
+            return state.selection;
+        }
+        let em = self.column_width();
+        let head = self.cursor();
+        let anchor = if self.selection_reversed {
+            self.selected_range.end
+        } else {
+            self.selected_range.start
+        };
+        ColumnSelection {
+            anchor_row: self.text.offset_to_point(anchor).row,
+            anchor_x: self.x_for_offset(anchor, em),
+            head_row: self.text.offset_to_point(head).row,
+            head_x: self.x_for_offset(head, em),
+            em,
+        }
+    }
+
+    fn column_select_by(&mut self, rows: isize, columns: f32, cx: &mut Context<Self>) {
+        if !self.mode.is_multi_line() || self.last_layout.is_none() {
+            return;
+        }
+        let mut column = self.current_column_selection();
+        let last_row = self.text.lines_len().saturating_sub(1);
+        let mut row = column.head_row;
+        if rows != 0 {
+            // Step over folded rows.
+            loop {
+                let next = row.saturating_add_signed(rows.signum()).min(last_row);
+                if next == row {
+                    break;
+                }
+                row = next;
+                if !self.display_map.is_buffer_line_hidden(row) {
+                    break;
+                }
+            }
+        }
+        column.head_row = row;
+        column.head_x = (column.head_x + column.em * columns).max(Pixels::ZERO);
+        self.apply_column_selection(column, false);
+        let cursor = self.cursor();
+        self.scroll_to(cursor, None, cx);
+        self.pause_blink_cursor(cx);
+        cx.notify();
+    }
+
+    pub(super) fn column_select_up(
+        &mut self,
+        _: &ColumnSelectUp,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.column_select_by(-1, 0., cx);
+    }
+
+    pub(super) fn column_select_down(
+        &mut self,
+        _: &ColumnSelectDown,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.column_select_by(1, 0., cx);
+    }
+
+    pub(super) fn column_select_left(
+        &mut self,
+        _: &ColumnSelectLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.column_select_by(0, -1., cx);
+    }
+
+    pub(super) fn column_select_right(
+        &mut self,
+        _: &ColumnSelectRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.column_select_by(0, 1., cx);
+    }
+
+    /// The row and content x under a mouse position.
+    fn row_x_for_mouse(&self, position: gpui::Point<Pixels>) -> Option<(usize, Pixels)> {
+        let bounds = self.last_bounds.as_ref()?;
+        let last_layout = self.last_layout.as_ref()?;
+        let x = (position.x - bounds.origin.x - last_layout.line_number_width).max(Pixels::ZERO);
+        let offset = self.index_for_mouse_position(position);
+        Some((self.text.offset_to_point(offset).row, x))
+    }
+
+    /// ⌥⇧-press or middle-press in the code editor starts a column selection:
+    /// from the caret with ⌥⇧, from the press itself with the middle button.
+    /// Returns `true` if handled.
+    pub(super) fn handle_column_select_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.mode.is_code_editor() || !self.mode.is_multi_line() {
+            return false;
+        }
+        let alt_shift = event.button == MouseButton::Left
+            && event.modifiers.alt
+            && event.modifiers.shift
+            && !event.modifiers.secondary();
+        let middle = event.button == MouseButton::Middle;
+        if !alt_shift && !middle {
+            return false;
+        }
+        let Some((row, x)) = self.row_x_for_mouse(event.position) else {
+            return false;
+        };
+        let mut column = if alt_shift {
+            self.current_column_selection()
+        } else {
+            ColumnSelection {
+                anchor_row: row,
+                anchor_x: x,
+                head_row: row,
+                head_x: x,
+                em: self.column_width(),
+            }
+        };
+        column.head_row = row;
+        column.head_x = x;
+        self.apply_column_selection(column, true);
+        self.selecting = false;
+        self.pause_blink_cursor(cx);
+        cx.notify();
+        true
+    }
+
+    /// A drag extending a column selection. Returns `true` if one is in
+    /// progress.
+    pub(super) fn drag_column_selection(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(state) = self.column_selection.as_ref().filter(|s| s.dragging) else {
+            return false;
+        };
+        let mut column = state.selection;
+        if let Some((row, x)) = self.row_x_for_mouse(position) {
+            column.head_row = row;
+            column.head_x = x;
+            self.apply_column_selection(column, true);
+            let cursor = self.cursor();
+            self.scroll_to(cursor, None, cx);
+            cx.notify();
+        }
+        true
+    }
+
+    /// Mouse up: a column drag ends (the selection stays extendable from the
+    /// keyboard).
+    pub(crate) fn end_column_drag(&mut self) {
+        if let Some(state) = self.column_selection.as_mut() {
+            state.dragging = false;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -889,6 +1453,18 @@ mod tests {
         );
         assert_eq!(distribute_paste("one\ntwo", 3), None);
         assert_eq!(distribute_paste("one", 1), None);
+        // Lines = cursors + 1 because of the trailing break: distributed.
+        assert_eq!(
+            distribute_paste("a\nb\n", 2),
+            Some(vec!["a".into(), "b".into()])
+        );
+        // …but that break isn't a line of its own for a third cursor.
+        assert_eq!(distribute_paste("a\nb\n", 3), None);
+        // An empty last line before the break still counts.
+        assert_eq!(
+            distribute_paste("a\n\n", 2),
+            Some(vec!["a".into(), "".into()])
+        );
     }
 
     fn build(cx: &mut TestAppContext, text: &str) -> (Entity<InputState>, VisualTestContext) {
@@ -1004,7 +1580,6 @@ mod tests {
                 assert_eq!(state.value(), "#one!\ntwo!\nthree!");
             });
         });
-        // `undo` collapses to one cursor.
         cx.update(|window, cx| {
             input.update(cx, |state, cx| {
                 state.undo(&Undo, window, cx);
@@ -1021,12 +1596,24 @@ mod tests {
         cx.update(|window, cx| {
             input.update(cx, |state, cx| {
                 state.set_selected_ranges([1..1, 3..3, 5..5], cx);
-                assert!(state.paste_at_selections("1\n2\n3", window, cx));
+                assert!(state.paste_at_selections("1\n2\n3", None, window, cx));
                 assert_eq!(state.value(), "a1\nb2\nc3");
 
+                // Whole lines copied elsewhere: the trailing line break ends
+                // the last line, it doesn't make a fourth.
+                assert!(state.paste_at_selections("4\n5\n6\n", None, window, cx));
+                assert_eq!(state.value(), "a14\nb25\nc36");
+
                 // A mismatched count pastes everything at every cursor.
-                assert!(state.paste_at_selections("xy", window, cx));
-                assert_eq!(state.value(), "a1xy\nb2xy\nc3xy");
+                assert!(state.paste_at_selections("xy", None, window, cx));
+                assert_eq!(state.value(), "a14xy\nb25xy\nc36xy");
+
+                // A multi-cursor copy's pieces go one per cursor even when
+                // they span lines.
+                let pieces = vec!["p\nq".to_string(), "".to_string(), "r".to_string()];
+                let text = pieces.join("\n");
+                assert!(state.paste_at_selections(&text, Some(pieces), window, cx));
+                assert_eq!(state.value(), "a14xyp\nq\nb25xy\nc36xyr");
             });
         });
     }
@@ -1168,5 +1755,137 @@ mod tests {
             });
         });
         assert_eq!(value(&input, &mut cx), "aXYZb\ncd");
+    }
+
+    #[gpui::test]
+    fn test_undo_redo_restore_every_cursor(cx: &mut TestAppContext) {
+        let (input, mut cx) = build(cx, "one\ntwo\nthree");
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_selected_ranges([0..3, 4..7], cx);
+                state.replace_text_in_range(None, "X", window, cx);
+                assert_eq!(state.value(), "X\nX\nthree");
+                let after = state.selected_ranges();
+                assert_eq!(after, vec![1..1, 3..3]);
+
+                // Move away, then undo: both selections come back.
+                state.set_selected_ranges([5..5], cx);
+                state.undo(&Undo, window, cx);
+                assert_eq!(state.value(), "one\ntwo\nthree");
+                assert_eq!(state.selected_ranges(), vec![0..3, 4..7]);
+                assert_eq!(state.selected_range(), 4..7);
+
+                state.redo(&crate::input::Redo, window, cx);
+                assert_eq!(state.value(), "X\nX\nthree");
+                assert_eq!(state.selected_ranges(), after);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_line_indent_touches_each_line_once(cx: &mut TestAppContext) {
+        let (input, mut cx) = build(cx, "    ab\n    cd");
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                // Two carets on the first line, one on the second.
+                state.set_selected_ranges([5..5, 6..6, 9..9], cx);
+                state.outdent(false, window, cx);
+                assert_eq!(state.value(), "  ab\n  cd");
+                assert_eq!(state.selected_ranges(), vec![3..3, 4..4, 5..5]);
+
+                state.indent(true, window, cx);
+                assert_eq!(state.value(), "    ab\n    cd");
+                assert_eq!(state.selected_ranges(), vec![5..5, 6..6, 9..9]);
+
+                // Tab with selections indents their lines, once each.
+                state.set_selected_ranges([4..5, 5..6], cx);
+                state.indent(false, window, cx);
+                assert_eq!(state.value(), "      ab\n    cd");
+
+                // One undo step.
+                state.undo(&Undo, window, cx);
+                assert_eq!(state.value(), "    ab\n    cd");
+                assert_eq!(state.selected_ranges(), vec![4..5, 5..6]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_skip_occurrence(cx: &mut TestAppContext) {
+        let (input, mut cx) = build(cx, "a b a b a");
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_selected_ranges([0..0], cx);
+                state.select_next_occurrence(&SelectNextOccurrence, window, cx);
+                state.select_next_occurrence(&SelectNextOccurrence, window, cx);
+                assert_eq!(state.selected_ranges(), vec![0..1, 4..5]);
+                // The newest one moves on to the next match.
+                state.skip_occurrence(&SkipOccurrence, window, cx);
+                assert_eq!(state.selected_ranges(), vec![0..1, 8..9]);
+                assert_eq!(state.selected_range(), 8..9);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_column_select_with_keys(cx: &mut TestAppContext) {
+        let (input, mut cx) = build(cx, "abcd\nab\nabcd");
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_selected_ranges([1..1], cx);
+                state.column_select_right(&ColumnSelectRight, window, cx);
+                state.column_select_right(&ColumnSelectRight, window, cx);
+                assert_eq!(state.selected_ranges(), vec![1..3]);
+                state.column_select_down(&ColumnSelectDown, window, cx);
+                state.column_select_down(&ColumnSelectDown, window, cx);
+                // The short middle line is clipped to its end.
+                assert_eq!(state.selected_ranges(), vec![1..3, 6..7, 9..11]);
+                assert_eq!(state.selected_range(), 9..11);
+                state.column_select_up(&ColumnSelectUp, window, cx);
+                assert_eq!(state.selected_ranges(), vec![1..3, 6..7]);
+
+                // Typing replaces the box.
+                state.replace_text_in_range(None, "-", window, cx);
+                assert_eq!(state.value(), "a-d\na-\nabcd");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_one_change_event_per_keystroke(cx: &mut TestAppContext) {
+        let (input, mut cx) = build(cx, "a\nb\nc");
+        let events = std::rc::Rc::new(std::cell::Cell::new(0));
+        cx.update(|_, cx| {
+            let events = events.clone();
+            cx.subscribe(&input, move |_, event: &crate::input::InputEvent, _| {
+                if matches!(event, crate::input::InputEvent::Change) {
+                    events.set(events.get() + 1);
+                }
+            })
+            .detach();
+        });
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_selected_ranges([1..1, 3..3, 5..5], cx);
+                state.replace_text_in_range(None, "!", window, cx);
+            });
+        });
+        assert_eq!(events.get(), 1);
+        // The listener reads the finished text.
+        assert_eq!(value(&input, &mut cx), "a!\nb!\nc!");
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| state.undo(&Undo, window, cx));
+        });
+        assert_eq!(events.get(), 2);
+
+        // Moving the cursors changes no text and sends nothing.
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                let left = InputState::each_selection(InputState::left);
+                left(state, &crate::input::MoveLeft, window, cx);
+            });
+        });
+        assert_eq!(events.get(), 2);
     }
 }

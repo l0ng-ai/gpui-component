@@ -1252,6 +1252,7 @@ impl InputState {
         let main = selections.remove(primary.min(selections.len() - 1));
         selections.push(main);
         self.set_selected_ranges(selections, cx);
+        self.record_selections_after_edit();
         self.scroll_to(self.cursor(), None, cx);
         self.pause_blink_cursor(cx);
     }
@@ -1262,6 +1263,7 @@ impl InputState {
         self.selection_reversed = false;
         self.selected_word_range = None;
         self.update_preferred_column();
+        self.record_selections_after_edit();
         self.scroll_to(self.cursor(), None, cx);
         self.pause_blink_cursor(cx);
         cx.notify();

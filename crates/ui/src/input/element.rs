@@ -303,7 +303,10 @@ impl TextElement {
             let state = self.state.clone();
 
             move |event: &MouseMoveEvent, _, window, cx| {
-                if event.pressed_button == Some(MouseButton::Left) {
+                if matches!(
+                    event.pressed_button,
+                    Some(MouseButton::Left | MouseButton::Middle)
+                ) {
                     state.update(cx, |state, cx| {
                         state.on_drag_move(event, window, cx);
                     });
@@ -322,6 +325,7 @@ impl TextElement {
                 state.update(cx, |state, _| {
                     state.auto_scroll.stop();
                     state.selecting = false;
+                    state.end_column_drag();
                 });
             }
         });
@@ -1509,6 +1513,9 @@ pub(super) struct PrepaintState {
     extra_selection_paths: Vec<Path<Pixels>>,
     /// Carets of the extra cursors, already scrolled.
     extra_cursor_bounds: Vec<Bounds<Pixels>>,
+    /// Buffer rows of the extra cursors, sorted: highlighted like the
+    /// primary's `current_row`.
+    extra_cursor_rows: Vec<usize>,
     hover_highlight_path: Option<Path<Pixels>>,
     search_match_paths: Vec<(Path<Pixels>, bool)>,
     /// The bracket next to the caret and its match.
@@ -1528,6 +1535,11 @@ pub(super) struct PrepaintState {
 }
 
 impl PrepaintState {
+    /// Whether `row` holds a cursor, primary or extra.
+    fn is_cursor_row(&self, row: usize) -> bool {
+        self.current_row == Some(row) || self.extra_cursor_rows.binary_search(&row).is_ok()
+    }
+
     /// Returns cursor bounds adjusted for scroll offset, if available.
     fn cursor_bounds_with_scroll(&self) -> Option<Bounds<Pixels>> {
         self.cursor_bounds.map(|mut bounds| {
@@ -2079,6 +2091,17 @@ impl Element for TextElement {
         let selection_path = self.layout_selections(&last_layout, &mut bounds, window, cx);
         let (extra_selection_paths, extra_cursor_bounds) =
             self.layout_extra_selections(&last_layout, &bounds, window, cx);
+        let extra_cursor_rows: Vec<usize> = {
+            let state = self.state.read(cx);
+            let mut rows: Vec<usize> = state
+                .extra_selections
+                .iter()
+                .map(|s| state.text.offset_to_point(s.head()).row)
+                .collect();
+            rows.sort_unstable();
+            rows.dedup();
+            rows
+        };
         let hover_highlight_path = self.layout_hover_highlight(&last_layout, &mut bounds, cx);
         let document_color_paths =
             self.layout_document_colors(&document_colors, &last_layout, &bounds, cx);
@@ -2112,7 +2135,9 @@ impl Element for TextElement {
                 let line_no: SharedString =
                     format!("{:>width$}", buffer_line + 1, width = line_number_len).into();
 
-                let runs = if current_row == Some(buffer_line) {
+                let runs = if current_row == Some(buffer_line)
+                    || extra_cursor_rows.binary_search(&buffer_line).is_ok()
+                {
                     &current_line_runs
                 } else {
                     &other_line_runs
@@ -2160,6 +2185,7 @@ impl Element for TextElement {
             selection_path,
             extra_selection_paths,
             extra_cursor_bounds,
+            extra_cursor_rows,
             search_match_paths,
             bracket_match_paths,
             hover_highlight_path,
@@ -2253,7 +2279,7 @@ impl Element for TextElement {
                 .iter()
                 .zip(prepaint.last_layout.visible_buffer_lines.iter())
             {
-                let is_active = prepaint.current_row == Some(buffer_line);
+                let is_active = prepaint.is_cursor_row(buffer_line);
                 let p = point(input_bounds.origin.x, origin.y + offset_y);
                 let height = line_height * lines.len() as f32;
                 // Paint the current line background
@@ -2449,7 +2475,7 @@ impl Element for TextElement {
                 .zip(prepaint.last_layout.visible_buffer_lines.iter())
             {
                 let p = point(input_bounds.origin.x, origin.y + offset_y);
-                let is_active = prepaint.current_row == Some(buffer_line);
+                let is_active = prepaint.is_cursor_row(buffer_line);
 
                 let height = line_height * lines.len() as f32;
                 // paint active line number background

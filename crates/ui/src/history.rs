@@ -124,6 +124,11 @@ where
         self.undos.push(item);
     }
 
+    /// The most recent change on the undo stack.
+    pub(crate) fn last_undo_mut(&mut self) -> Option<&mut I> {
+        self.undos.last_mut()
+    }
+
     /// Get the undo stack.
     pub fn undos(&self) -> &Vec<I> {
         &self.undos
