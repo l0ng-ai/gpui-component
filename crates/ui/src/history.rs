@@ -28,6 +28,8 @@ pub struct History<I: HistoryItem> {
     max_undos: usize,
     group_interval: Option<Duration>,
     grouping: bool,
+    /// Set by [`Self::break_group`]: the next push starts a new version.
+    force_new_version: bool,
     unique: bool,
 }
 
@@ -45,6 +47,7 @@ where
             max_undos: 1000,
             group_interval: None,
             grouping: false,
+            force_new_version: false,
             unique: false,
         }
     }
@@ -78,10 +81,19 @@ where
         self.grouping = false;
     }
 
+    /// Make the next push start a new version even inside the group
+    /// interval, so a command is its own undo step rather than merging into
+    /// the typing around it.
+    pub fn break_group(&mut self) {
+        self.force_new_version = true;
+    }
+
     /// Increment the version number if the last change was made more than `GROUP_INTERVAL` milliseconds ago.
     fn inc_version(&mut self) -> usize {
         let t = Instant::now();
-        if !self.grouping && Some(self.last_changed_at.elapsed()) > self.group_interval {
+        if std::mem::take(&mut self.force_new_version)
+            || !self.grouping && Some(self.last_changed_at.elapsed()) > self.group_interval
+        {
             self.version += 1;
         }
 

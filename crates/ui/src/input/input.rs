@@ -290,7 +290,13 @@ impl RenderOnce for Input {
         div()
             .id(("input", self.state.entity_id()))
             .flex()
-            .key_context(crate::input::CONTEXT)
+            .key_context(
+                if state.mode.is_code_editor() && state.mode.is_multi_line() {
+                    crate::input::editing::INPUT_CODE_EDITOR_KEY_CONTEXT
+                } else {
+                    crate::input::CONTEXT
+                },
+            )
             .track_focus(&state.focus_handle.clone())
             .tab_index(self.tab_index)
             .when(!state.disabled, |this| {
@@ -316,6 +322,27 @@ impl RenderOnce for Input {
                     })
                     .on_action(
                         window.listener_for(&self.state, InputState::on_action_toggle_code_actions),
+                    )
+                    .when(state.mode.is_code_editor(), |this| {
+                        this.on_action(
+                            window.listener_for(&self.state, InputState::toggle_line_comment),
+                        )
+                        .on_action(
+                            window.listener_for(&self.state, InputState::toggle_block_comment),
+                        )
+                        .on_action(window.listener_for(&self.state, InputState::move_line_up))
+                        .on_action(window.listener_for(&self.state, InputState::move_line_down))
+                        .on_action(window.listener_for(&self.state, InputState::copy_line_up))
+                        .on_action(window.listener_for(&self.state, InputState::copy_line_down))
+                        .on_action(window.listener_for(&self.state, InputState::delete_line))
+                        .on_action(window.listener_for(&self.state, InputState::insert_line_below))
+                        .on_action(window.listener_for(&self.state, InputState::insert_line_above))
+                    })
+            })
+            .when(state.mode.is_code_editor(), |this| {
+                this.on_action(window.listener_for(&self.state, InputState::select_line_action))
+                    .on_action(
+                        window.listener_for(&self.state, InputState::move_to_matching_bracket),
                     )
             })
             .on_action(window.listener_for(&self.state, InputState::left))
