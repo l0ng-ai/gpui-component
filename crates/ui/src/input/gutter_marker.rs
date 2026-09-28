@@ -10,6 +10,9 @@
 use std::{ops::Range, rc::Rc};
 
 use gpui::{App, Context, Hsla, Pixels, Point, Window};
+
+use crate::ActiveTheme as _;
+use crate::highlighter::DiagnosticSeverity;
 use ropey::Rope;
 
 use super::{InputState, RopeExt as _};
@@ -296,6 +299,129 @@ pub(super) fn visible_marks(
     out
 }
 
+/// How loudly a diagnostic speaks for its line: only errors and warnings
+/// earn the line number a color or the overview ruler a tick.
+fn problem_rank(severity: DiagnosticSeverity) -> u8 {
+    match severity {
+        DiagnosticSeverity::Error => 2,
+        DiagnosticSeverity::Warning => 1,
+        _ => 0,
+    }
+}
+
+/// The worst problem on each line that has an error or a warning among the
+/// diagnostics starting in `bytes`, as `(line, rank, severity)` sorted by line.
+fn problem_lines(
+    set: &crate::highlighter::DiagnosticSet,
+    bytes: Option<Range<usize>>,
+) -> Vec<(usize, DiagnosticSeverity)> {
+    let mut worst: std::collections::BTreeMap<usize, DiagnosticSeverity> = Default::default();
+    let mut note = |entry: &crate::highlighter::DiagnosticEntry| {
+        let severity = entry.diagnostic.severity;
+        if problem_rank(severity) == 0 {
+            return;
+        }
+        let line = entry.diagnostic.range.start.line as usize;
+        let slot = worst.entry(line).or_insert(severity);
+        if problem_rank(severity) > problem_rank(*slot) {
+            *slot = severity;
+        }
+    };
+    match bytes {
+        Some(bytes) => set.range(bytes).for_each(&mut note),
+        None => set.iter().take(MAX_RULER_DIAGNOSTICS).for_each(&mut note),
+    }
+    worst.into_iter().collect()
+}
+
+/// Past this many diagnostics the ruler stops reading them: a file that bad
+/// is solid color anyway.
+const MAX_RULER_DIAGNOSTICS: usize = 5000;
+
+impl InputState {
+    /// The color the line number of each visible line with an error or a
+    /// warning is drawn in.
+    pub(super) fn problem_line_number_colors(
+        &self,
+        visible_bytes: &Range<usize>,
+        cx: &App,
+    ) -> std::collections::HashMap<usize, Hsla> {
+        let Some(set) = self.diagnostics().filter(|set| !set.is_empty()) else {
+            return Default::default();
+        };
+        problem_lines(set, Some(visible_bytes.clone()))
+            .into_iter()
+            .map(|(line, severity)| (line, severity.fg(cx)))
+            .collect()
+    }
+
+    /// Paint the overview ruler: a tick on the scrollbar track for every
+    /// gutter marker (left column) and every line with an error or a warning
+    /// (right column), at the height the scrollbar thumb would sit to show it.
+    pub(super) fn paint_overview_ruler(
+        &self,
+        track: gpui::Bounds<Pixels>,
+        scroll_height: Pixels,
+        window: &mut Window,
+        cx: &App,
+    ) {
+        use super::display_map::BufferPoint;
+        use gpui::{fill, point, px, size};
+
+        let Some(line_height) = self.last_layout.as_ref().map(|l| l.line_height) else {
+            return;
+        };
+        // Nothing to scroll to: everything the ruler would point at is on
+        // screen already.
+        if scroll_height <= track.size.height || line_height <= px(0.) {
+            return;
+        }
+        let diagnostics = self
+            .diagnostics()
+            .filter(|set| !set.is_empty())
+            .map(|set| problem_lines(set, None))
+            .unwrap_or_default();
+        if self.gutter_markers.markers.is_empty() && diagnostics.is_empty() {
+            return;
+        }
+        let scale = track.size.height / scroll_height;
+        let row_of = |line: usize| {
+            self.display_map
+                .buffer_pos_to_display_pos(BufferPoint::new(line, 0))
+                .row
+        };
+        let tick = |rows: Range<usize>, column: usize, color: Hsla, window: &mut Window| {
+            const TICK_WIDTH: Pixels = px(3.);
+            let top = track.origin.y + line_height * rows.start as f32 * scale;
+            let height = (line_height * rows.len().max(1) as f32 * scale).max(px(2.));
+            let x = track.right() - px(if column == 0 { 9. } else { 5. });
+            window.paint_quad(fill(
+                gpui::Bounds::new(point(x, top), size(TICK_WIDTH, height)),
+                color,
+            ));
+        };
+        let theme = cx.theme();
+        for marker in &self.gutter_markers.markers {
+            let color = marker.color.unwrap_or(match marker.kind {
+                GutterMarkerKind::Added => theme.success,
+                GutterMarkerKind::Modified => theme.warning,
+                GutterMarkerKind::Deleted => theme.danger,
+            });
+            let start = row_of(marker.lines.start);
+            let end = if marker.lines.is_empty() {
+                start
+            } else {
+                row_of(marker.lines.end - 1) + 1
+            };
+            tick(start..end, 0, color.opacity(0.8), window);
+        }
+        for (line, severity) in diagnostics {
+            let row = row_of(line);
+            tick(row..row + 1, 1, severity.fg(cx), window);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,5 +581,31 @@ mod tests {
                 );
             });
         });
+    }
+
+    #[test]
+    fn only_errors_and_warnings_mark_a_line_and_the_worst_wins() {
+        use crate::highlighter::{Diagnostic, DiagnosticSet};
+        use lsp_types::Position;
+
+        let text = Rope::from("a\nb\nc\nd\n");
+        let mut set = DiagnosticSet::new(&text);
+        let at = |line: u32| Position::new(line, 0)..Position::new(line, 1);
+        set.push(Diagnostic::new(at(0), "hint").with_severity(DiagnosticSeverity::Hint));
+        set.push(Diagnostic::new(at(1), "warn").with_severity(DiagnosticSeverity::Warning));
+        set.push(Diagnostic::new(at(1), "err").with_severity(DiagnosticSeverity::Error));
+        set.push(Diagnostic::new(at(3), "warn").with_severity(DiagnosticSeverity::Warning));
+        assert_eq!(
+            problem_lines(&set, None),
+            vec![
+                (1, DiagnosticSeverity::Error),
+                (3, DiagnosticSeverity::Warning)
+            ]
+        );
+        // Only what starts in the byte range asked about.
+        assert_eq!(
+            problem_lines(&set, Some(0..4)),
+            vec![(1, DiagnosticSeverity::Error)]
+        );
     }
 }
