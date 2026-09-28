@@ -7,6 +7,7 @@ mod clear_button;
 mod cursor;
 mod display_map;
 mod element;
+mod gutter_marker;
 mod indent;
 mod input;
 mod lsp;
@@ -27,6 +28,9 @@ pub use cursor::*;
 #[cfg(target_family = "wasm")]
 pub use display_map::folding::Tree;
 pub use display_map::{BufferPoint, DisplayMap, DisplayPoint, FoldRange};
+pub use gutter_marker::{
+    GutterMarker, GutterMarkerClick, GutterMarkerKind, adjust_markers_for_edit,
+};
 pub use indent::TabSize;
 pub use input::*;
 pub use lsp::*;

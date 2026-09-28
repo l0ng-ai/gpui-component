@@ -1535,6 +1535,149 @@ impl PrepaintState {
     }
 }
 
+/// Gutter markers — see [`super::gutter_marker`].
+impl TextElement {
+    /// Paints the host's per-line markers as a thin bar just right of the
+    /// gutter background (a wedge on the line boundary for deletions), and
+    /// listens for clicks on them.
+    fn paint_gutter_markers(
+        &self,
+        input_bounds: Bounds<Pixels>,
+        prepaint: &PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        use super::gutter_marker::{GutterMarkerClick, GutterMarkerKind, MarkPlacement};
+
+        const BAR_WIDTH: Pixels = px(3.);
+        const WEDGE_HALF_HEIGHT: Pixels = px(4.);
+        const WEDGE_WIDTH: Pixels = px(6.);
+
+        let state = self.state.read(cx);
+        let markers = &state.gutter_markers.markers;
+        if markers.is_empty() {
+            return;
+        }
+        let layout = &prepaint.last_layout;
+        let folded = state.display_map.folded_ranges();
+        let marks = super::gutter_marker::visible_marks(
+            markers,
+            &layout.visible_buffer_lines,
+            state.text.lines_len(),
+            |line| {
+                folded
+                    .iter()
+                    .filter(|f| f.start_line == line)
+                    .map(|f| f.end_line)
+                    .max()
+                    .unwrap_or(line + 1)
+            },
+        );
+        if marks.is_empty() {
+            return;
+        }
+
+        // Row tops, laid out exactly as the line numbers are.
+        let line_height = window.line_height();
+        let mut rows = Vec::with_capacity(layout.lines.len());
+        let mut y = prepaint.bounds.origin.y + layout.visible_top;
+        for (line, &buffer_line) in layout.lines.iter().zip(&layout.visible_buffer_lines) {
+            let height = line_height * line.wrapped_lines.len().max(1) as f32;
+            rows.push((y, height));
+            y += height;
+            if !prepaint.ghost_lines.is_empty() && prepaint.current_row == Some(buffer_line) {
+                y += prepaint.ghost_lines_height;
+            }
+        }
+
+        let theme = cx.theme();
+        let bar_x = input_bounds.origin.x + layout.line_number_width - LINE_NUMBER_RIGHT_MARGIN;
+        let mut targets: Vec<(Bounds<Pixels>, usize, usize)> = Vec::with_capacity(marks.len());
+        for mark in &marks {
+            let Some(&(top, height)) = rows.get(mark.row) else {
+                continue;
+            };
+            let color = mark.color.unwrap_or(match mark.kind {
+                GutterMarkerKind::Added => theme.success,
+                GutterMarkerKind::Modified => theme.warning,
+                GutterMarkerKind::Deleted => theme.danger,
+            });
+            let line = layout.visible_buffer_lines[mark.row];
+            match mark.placement {
+                MarkPlacement::Bar => {
+                    let bar = Bounds::new(point(bar_x, top), size(BAR_WIDTH, height));
+                    window.paint_quad(fill(bar, color));
+                    targets.push((bar, mark.marker, line));
+                }
+                MarkPlacement::WedgeTop | MarkPlacement::WedgeBottom => {
+                    let edge = if mark.placement == MarkPlacement::WedgeTop {
+                        top
+                    } else {
+                        top + height
+                    };
+                    let mut builder = gpui::PathBuilder::fill();
+                    builder.move_to(point(bar_x, edge - WEDGE_HALF_HEIGHT));
+                    builder.line_to(point(bar_x + WEDGE_WIDTH, edge));
+                    builder.line_to(point(bar_x, edge + WEDGE_HALF_HEIGHT));
+                    builder.close();
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, color);
+                    }
+                    targets.push((
+                        Bounds::new(
+                            point(bar_x, edge - WEDGE_HALF_HEIGHT),
+                            size(WEDGE_WIDTH, WEDGE_HALF_HEIGHT * 2.),
+                        ),
+                        mark.marker,
+                        line,
+                    ));
+                }
+            }
+        }
+
+        let Some(on_click) = state.gutter_markers.on_click.clone() else {
+            return;
+        };
+        // The whole margin between the gutter and the text is the target, not
+        // just the 3px bar.
+        let slop = LINE_NUMBER_RIGHT_MARGIN - BAR_WIDTH;
+        let targets: Vec<(Bounds<Pixels>, super::GutterMarker, usize)> = targets
+            .into_iter()
+            .filter_map(|(b, ix, line)| {
+                let b = Bounds::new(
+                    point(b.origin.x - px(2.), b.origin.y),
+                    size(b.size.width.max(BAR_WIDTH) + slop + px(2.), b.size.height),
+                );
+                Some((b, markers.get(ix)?.clone(), line))
+            })
+            .collect();
+        let hitbox = prepaint.fold_icon_layout.line_number_hitbox.clone();
+        window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, window, cx| {
+            if !phase.bubble() || event.button != MouseButton::Left {
+                return;
+            }
+            if !input_bounds.contains(&event.position) || !hitbox.is_hovered(window) {
+                return;
+            }
+            let Some((_, marker, line)) =
+                targets.iter().find(|(b, _, _)| b.contains(&event.position))
+            else {
+                return;
+            };
+            cx.stop_propagation();
+            on_click(
+                &GutterMarkerClick {
+                    marker: marker.clone(),
+                    line: *line,
+                    position: event.position,
+                },
+                window,
+                cx,
+            );
+        });
+    }
+}
+
 impl IntoElement for TextElement {
     type Element = Self;
 
@@ -2326,6 +2469,10 @@ impl Element for TextElement {
             window,
             cx,
         );
+
+        if prepaint.line_numbers.is_some() {
+            self.paint_gutter_markers(input_bounds, prepaint, window, cx);
+        }
 
         self.state.update(cx, |state, cx| {
             state.last_layout = Some(prepaint.last_layout.clone());
