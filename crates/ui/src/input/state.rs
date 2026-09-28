@@ -740,6 +740,25 @@ impl InputState {
         cx.notify();
     }
 
+    /// The syntax tree the highlighter last parsed, with the language it is
+    /// in and the text it was parsed from — byte offsets in the tree index
+    /// into that text, which may trail [`Self::text`] while a parse is still
+    /// catching up with an edit.
+    ///
+    /// `None` outside code-editor mode, and before the editor's first parse.
+    /// The tree is reference-counted, so the clone is cheap.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn syntax_tree(&self) -> Option<(SharedString, tree_sitter::Tree, Rope)> {
+        let highlighter = self.mode.highlighter()?.borrow();
+        let highlighter = highlighter.as_ref()?;
+        let tree = highlighter.tree()?.clone();
+        Some((
+            highlighter.language().clone(),
+            tree,
+            highlighter.text().clone(),
+        ))
+    }
+
     #[inline]
     pub fn diagnostics(&self) -> Option<&DiagnosticSet> {
         self.mode.diagnostics()
@@ -1225,6 +1244,20 @@ impl InputState {
         self.move_to(offset, None, cx);
         self.update_preferred_column();
         self.focus(window, cx);
+    }
+
+    /// Like [`Self::set_cursor_position`], but leaves focus where it is: for
+    /// previewing a location while a picker keeps the keyboard.
+    pub fn preview_cursor_position(
+        &mut self,
+        position: impl Into<Position>,
+        cx: &mut Context<Self>,
+    ) {
+        let position: Position = position.into();
+        let offset = self.text.position_to_offset(&position);
+        self.clear_extra_selections();
+        self.move_to(offset, None, cx);
+        self.update_preferred_column();
     }
 
     /// Focus the input field.
