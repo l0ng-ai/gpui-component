@@ -6,6 +6,7 @@ mod change;
 mod clear_button;
 mod cursor;
 mod display_map;
+mod edit_log;
 mod editing;
 mod element;
 mod gutter_marker;
@@ -29,6 +30,7 @@ pub use cursor::*;
 #[cfg(target_family = "wasm")]
 pub use display_map::folding::Tree;
 pub use display_map::{BufferPoint, DisplayMap, DisplayPoint, FoldRange};
+pub use edit_log::{EDIT_LOG_LEN, LineEdit};
 pub use editing::{
     CODE_EDITOR_CONTEXT, CopyLineDown, CopyLineUp, DeleteLine, InsertLineAbove, InsertLineBelow,
     JoinLines, MoveLineDown, MoveLineUp, MoveToMatchingBracket, RemoveSurroundingBrackets,

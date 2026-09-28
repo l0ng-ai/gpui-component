@@ -470,6 +470,8 @@ pub struct InputState {
 
     /// See [`Self::set_gutter_markers`].
     pub(super) gutter_markers: super::gutter_marker::GutterMarkers,
+    /// See [`Self::line_edits_since`].
+    pub(super) edit_log: super::edit_log::EditLog,
 }
 
 impl EventEmitter<InputEvent> for InputState {}
@@ -576,6 +578,7 @@ impl InputState {
             cursor_line_end_affinity: false,
             auto_scroll: AutoScroll::default(),
             gutter_markers: Default::default(),
+            edit_log: Default::default(),
         }
     }
 
@@ -3026,6 +3029,7 @@ impl EntityInputHandler for InputState {
         self.display_map
             .adjust_folds_for_edit(&old_text, &range, new_text);
         self.adjust_gutter_markers_for_edit(&old_text, &range, new_text);
+        self.log_line_edit(&old_text, &range, new_text);
         self.display_map
             .on_text_changed(&self.text, &range, &Rope::from(new_text), cx);
 
@@ -3109,6 +3113,7 @@ impl EntityInputHandler for InputState {
         self.display_map
             .adjust_folds_for_edit(&old_text, &range, new_text);
         self.adjust_gutter_markers_for_edit(&old_text, &range, new_text);
+        self.log_line_edit(&old_text, &range, new_text);
         self.display_map
             .on_text_changed(&self.text, &range, &Rope::from(new_text), cx);
 
