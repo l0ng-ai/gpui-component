@@ -9,6 +9,7 @@ use gpui::{
     prelude::FluentBuilder, px, relative,
 };
 use lsp_types::{CompletionItem, CompletionTextEdit};
+use sum_tree::Bias;
 
 const MAX_MENU_WIDTH: Pixels = px(320.);
 const MAX_MENU_HEIGHT: Pixels = px(240.);
@@ -317,10 +318,17 @@ impl CompletionMenu {
                             range.end = editor.text.position_to_offset(&edit.replace.end);
                         }
                     }
-                } else if let Some(insert_text) = item.insert_text.clone() {
-                    // Replaces what was typed since the menu opened, as the
-                    // label does, rather than going in after it.
-                    new_text = insert_text;
+                } else {
+                    // No range of its own: it replaces the word being typed
+                    // since the menu opened — not the trigger character
+                    // (`.`, `::`) that opened it, which comes before.
+                    let end = editor.text.clip_offset(range.end, Bias::Left);
+                    let start = editor.text.clip_offset(range.start.min(end), Bias::Left);
+                    let typed = editor.text.slice(start..end).to_string();
+                    range = word_start(&typed, start)..end;
+                    if let Some(insert_text) = item.insert_text.clone() {
+                        new_text = insert_text;
+                    }
                 }
 
                 // The completion and its additional edits (an import at the
@@ -545,6 +553,20 @@ impl Render for CompletionMenu {
     }
 }
 
+/// Where a completion with no range of its own starts replacing, given the
+/// text typed since the menu opened (`typed`, starting at `start`): after
+/// the last character that cannot be part of a word.
+fn word_start(typed: &str, start: usize) -> usize {
+    match typed
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !(c.is_alphanumeric() || *c == '_'))
+    {
+        Some((ix, c)) => start + ix + c.len_utf8(),
+        None => start,
+    }
+}
+
 /// The completion and its additional edits (an import at the top, say), all
 /// written against the text as it is now, in the order to apply them: from
 /// the end backwards, so each leaves the others' offsets alone. An edit that
@@ -607,5 +629,16 @@ mod tests {
         let out = apply(text, &edits);
         assert_eq!(out, "use X;\nfn a() {}\nHashMap");
         assert_eq!(caret, out.len());
+    }
+
+    #[test]
+    fn a_fallback_completion_keeps_the_trigger_character() {
+        // `os.` opened the menu: typed since then is `.`, then `.pa`.
+        assert_eq!(word_start(".", 2), 3);
+        assert_eq!(word_start(".pa", 2), 3);
+        assert_eq!(word_start("::", 5), 7);
+        // Opened on a word character: all of it is replaced.
+        assert_eq!(word_start("pa", 3), 3);
+        assert_eq!(word_start("é", 0), 0);
     }
 }
