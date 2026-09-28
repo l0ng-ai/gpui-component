@@ -1744,6 +1744,11 @@ impl InputState {
         if event.button == MouseButton::Right {
             if self.enable_context_menu || self.context_menu_builder.is_some() {
                 self.handle_right_click_menu(event, offset, window, cx);
+            } else if !self.selected_range.contains(offset) {
+                // A menu drawn by the host still acts on what was clicked:
+                // keep a selection the click landed in, otherwise put the
+                // caret there, as the built-in menu does.
+                self.move_to(offset, None, cx);
             }
             return;
         }
