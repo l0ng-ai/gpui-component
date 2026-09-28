@@ -1511,6 +1511,8 @@ pub(super) struct PrepaintState {
     extra_cursor_bounds: Vec<Bounds<Pixels>>,
     hover_highlight_path: Option<Path<Pixels>>,
     search_match_paths: Vec<(Path<Pixels>, bool)>,
+    /// The bracket next to the caret and its match.
+    bracket_match_paths: Vec<Path<Pixels>>,
     document_color_paths: Vec<(Path<Pixels>, Hsla)>,
     hover_definition_hitbox: Option<Hitbox>,
     indent_guides_path: Option<Path<Pixels>>,
@@ -2062,6 +2064,18 @@ impl Element for TextElement {
         last_layout.cursor_bounds = cursor_bounds;
 
         let search_match_paths = self.layout_search_matches(&last_layout, &mut bounds, cx);
+        let bracket_match_paths = {
+            let state = self.state.read(cx);
+            if state.focus_handle.is_focused(window) {
+                state
+                    .bracket_highlight_ranges()
+                    .into_iter()
+                    .filter_map(|range| Self::layout_match_range(range, &last_layout, &bounds))
+                    .collect()
+            } else {
+                vec![]
+            }
+        };
         let selection_path = self.layout_selections(&last_layout, &mut bounds, window, cx);
         let (extra_selection_paths, extra_cursor_bounds) =
             self.layout_extra_selections(&last_layout, &bounds, window, cx);
@@ -2147,6 +2161,7 @@ impl Element for TextElement {
             extra_selection_paths,
             extra_cursor_bounds,
             search_match_paths,
+            bracket_match_paths,
             hover_highlight_path,
             hover_definition_hitbox,
             document_color_paths,
@@ -2276,6 +2291,10 @@ impl Element for TextElement {
             // Paint indent guides
             if let Some(path) = prepaint.indent_guides_path.take() {
                 window.paint_path(path, cx.theme().border.opacity(0.85));
+            }
+
+            for path in prepaint.bracket_match_paths.drain(..) {
+                window.paint_path(path, cx.theme().selection.opacity(0.5));
             }
 
             // Paint selections

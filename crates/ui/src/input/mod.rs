@@ -6,6 +6,7 @@ mod change;
 mod clear_button;
 mod cursor;
 mod display_map;
+mod editing;
 mod element;
 mod gutter_marker;
 mod indent;
@@ -28,6 +29,11 @@ pub use cursor::*;
 #[cfg(target_family = "wasm")]
 pub use display_map::folding::Tree;
 pub use display_map::{BufferPoint, DisplayMap, DisplayPoint, FoldRange};
+pub use editing::{
+    CODE_EDITOR_CONTEXT, CopyLineDown, CopyLineUp, DeleteLine, InsertLineAbove, InsertLineBelow,
+    MoveLineDown, MoveLineUp, MoveToMatchingBracket, SelectLine, ToggleBlockComment,
+    ToggleLineComment,
+};
 pub use gutter_marker::{
     GutterMarker, GutterMarkerClick, GutterMarkerKind, adjust_markers_for_edit,
 };

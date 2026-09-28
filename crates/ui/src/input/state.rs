@@ -275,6 +275,7 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("ctrl-f", Search, Some(CONTEXT)),
     ]);
 
+    super::editing::init(cx);
     number_input::init(cx);
     super::multi_selection::init(cx);
 }
@@ -1504,6 +1505,10 @@ impl InputState {
     }
 
     pub(super) fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.handle_backspace_pair(window, cx) {
+            self.pause_blink_cursor(cx);
+            return;
+        }
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor()), cx)
         }
@@ -1631,6 +1636,11 @@ impl InputState {
 
         if insert_newline {
             self.edit_each_selection(window, cx, |this, window, cx| {
+                // Enter after an opening bracket opens an indented block.
+                if this.handle_smart_newline(window, cx) {
+                    return;
+                }
+
                 // Get current line indent
                 let indent = if this.mode.is_code_editor() {
                     this.indent_of_next_line()
@@ -2867,6 +2877,11 @@ impl EntityInputHandler for InputState {
             && !self.silent_replace_text
         {
             self.replace_text_at_each_selection(range_utf16, new_text, window, cx);
+            return;
+        }
+
+        // Bracket and quote pairing; runs once per cursor from the branch above.
+        if self.handle_typed_pair(range_utf16.as_ref(), new_text, window, cx) {
             return;
         }
 
