@@ -24,6 +24,21 @@ pub trait DefinitionProvider {
         _window: &mut Window,
         _cx: &mut App,
     ) -> Task<Result<Vec<lsp_types::LocationLink>>>;
+
+    /// Follows `location` when the user asks to (secondary-click on a
+    /// symbol, or [`GoToDefinition`]).
+    ///
+    /// Return `true` when the provider took care of it — opened another
+    /// file, say. The default returns `false`, and the editor selects the
+    /// target range in its own text.
+    fn open_definition(
+        &self,
+        _location: &lsp_types::LocationLink,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Default)]
@@ -111,7 +126,7 @@ impl InputState {
     pub(crate) fn on_action_go_to_definition(
         &mut self,
         _: &GoToDefinition,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let offset = self.cursor();
@@ -121,7 +136,7 @@ impl InputState {
             }
 
             if let Some(location) = locations.first().cloned() {
-                self.go_to_definition(&location, cx);
+                self.go_to_definition(&location, window, cx);
             }
         }
     }
@@ -131,7 +146,7 @@ impl InputState {
         &mut self,
         event: &MouseDownEvent,
         offset: usize,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<InputState>,
     ) -> bool {
         if !event.modifiers.secondary() {
@@ -149,7 +164,7 @@ impl InputState {
             return false;
         };
 
-        self.go_to_definition(&location, cx);
+        self.go_to_definition(&location, window, cx);
 
         true
     }
@@ -157,8 +172,15 @@ impl InputState {
     pub(crate) fn go_to_definition(
         &mut self,
         location: &lsp_types::LocationLink,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(provider) = self.lsp.definition_provider.clone()
+            && provider.open_definition(location, window, cx)
+        {
+            return;
+        }
+
         if location
             .target_uri
             .scheme()
