@@ -449,6 +449,9 @@ pub struct InputState {
     pub(super) inline_completion: InlineCompletion,
 
     pub(super) auto_scroll: AutoScroll,
+
+    /// See [`Self::set_gutter_markers`].
+    pub(super) gutter_markers: super::gutter_marker::GutterMarkers,
 }
 
 impl EventEmitter<InputEvent> for InputState {}
@@ -548,6 +551,7 @@ impl InputState {
             inline_completion: InlineCompletion::default(),
             cursor_line_end_affinity: false,
             auto_scroll: AutoScroll::default(),
+            gutter_markers: Default::default(),
         }
     }
 
@@ -2845,6 +2849,7 @@ impl EntityInputHandler for InputState {
         // Adjust folds before updating wrap map: remove overlapping folds and shift others
         self.display_map
             .adjust_folds_for_edit(&old_text, &range, new_text);
+        self.adjust_gutter_markers_for_edit(&old_text, &range, new_text);
         self.display_map
             .on_text_changed(&self.text, &range, &Rope::from(new_text), cx);
 
@@ -2919,6 +2924,7 @@ impl EntityInputHandler for InputState {
         // Adjust folds before updating wrap map: remove overlapping folds and shift others
         self.display_map
             .adjust_folds_for_edit(&old_text, &range, new_text);
+        self.adjust_gutter_markers_for_edit(&old_text, &range, new_text);
         self.display_map
             .on_text_changed(&self.text, &range, &Rope::from(new_text), cx);
 
