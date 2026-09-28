@@ -31,8 +31,9 @@ pub use display_map::folding::Tree;
 pub use display_map::{BufferPoint, DisplayMap, DisplayPoint, FoldRange};
 pub use editing::{
     CODE_EDITOR_CONTEXT, CopyLineDown, CopyLineUp, DeleteLine, InsertLineAbove, InsertLineBelow,
-    MoveLineDown, MoveLineUp, MoveToMatchingBracket, SelectLine, ToggleBlockComment,
-    ToggleLineComment,
+    JoinLines, MoveLineDown, MoveLineUp, MoveToMatchingBracket, RemoveSurroundingBrackets,
+    SelectLine, ToggleBlockComment, ToggleLineComment, TransformToLowercase, TransformToTitleCase,
+    TransformToUppercase, TrimTrailingWhitespace,
 };
 pub use gutter_marker::{
     GutterMarker, GutterMarkerClick, GutterMarkerKind, adjust_markers_for_edit,

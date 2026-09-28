@@ -356,6 +356,8 @@ pub struct InputState {
     /// Cursors beyond the primary one (`selected_range`), for multi-cursor
     /// editing. See [`Self::edit_each_selection`].
     pub(super) extra_selections: Vec<ExtraSelection>,
+    /// State of the code editor's editing commands (auto-closed pairs, ...).
+    pub(super) editing: super::editing::EditingState,
     /// Set while [`Self::edit_each_selection`] runs.
     pub(super) multi_edit: Option<MultiEdit>,
     /// Select-next-occurrence matches whole words only (it started from a
@@ -504,6 +506,7 @@ impl InputState {
             history,
             selected_range: Selection::default(),
             extra_selections: Vec::new(),
+            editing: Default::default(),
             multi_edit: None,
             occurrence_whole_word: false,
             search_panel: None,
@@ -2969,6 +2972,7 @@ impl EntityInputHandler for InputState {
         }
 
         self.update_fold_candidates_incremental(&range, new_text);
+        self.on_text_edited(&range, new_text.len());
         self.lsp.update(&self.text, window, cx);
         self.selected_range = (new_offset..new_offset).into();
         self.ime_marked_range.take();
@@ -3045,6 +3049,7 @@ impl EntityInputHandler for InputState {
         }
 
         self.update_fold_candidates_incremental(&range, new_text);
+        self.on_text_edited(&range, new_text.len());
         self.lsp.update(&self.text, window, cx);
         if new_text.is_empty() {
             // Cancel selection, when cancel IME input.
