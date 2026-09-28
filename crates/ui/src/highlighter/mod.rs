@@ -16,6 +16,10 @@ pub use highlighter::*;
 pub use languages::*;
 #[cfg(not(target_family = "wasm"))]
 pub use registry::*;
+/// The parser the highlighter runs, for callers that query its trees
+/// themselves ([`crate::input::InputState::syntax_tree`]).
+#[cfg(not(target_family = "wasm"))]
+pub use tree_sitter;
 
 // WASM stub implementation (no tree-sitter support)
 #[cfg(target_family = "wasm")]
