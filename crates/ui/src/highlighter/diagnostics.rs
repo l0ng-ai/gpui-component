@@ -506,4 +506,26 @@ mod tests {
         assert_eq!(ranges(&diagnostics), [19..24]);
         assert_eq!(diagnostics.iter().next().unwrap().message.as_str(), "second");
     }
+
+    #[test]
+    fn enter_at_column_zero_pushes_a_diagnostic_down_with_its_line() {
+        use ropey::Rope;
+
+        use super::{Diagnostic, DiagnosticSet};
+
+        let text = Rope::from("a\nlet x;\n");
+        let mut diagnostics = DiagnosticSet::new(&text);
+        diagnostics.replace_all(
+            &text,
+            vec![Diagnostic::new(
+                Position::new(1, 0)..Position::new(1, 3),
+                "at column 0",
+            )],
+        );
+        let text = Rope::from("a\n\nlet x;\n");
+        diagnostics.edit(&(2..2), 1, &text);
+        let entry = diagnostics.iter().next().unwrap();
+        assert_eq!(entry.range, 3..6);
+        assert_eq!(entry.diagnostic.range.start, Position::new(2, 0));
+    }
 }

@@ -15,7 +15,7 @@ use crate::ActiveTheme as _;
 use crate::highlighter::DiagnosticSeverity;
 use ropey::Rope;
 
-use super::{InputState, RopeExt as _};
+use super::InputState;
 
 /// What a [`GutterMarker`] says about its lines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -137,15 +137,32 @@ impl InputState {
         if self.gutter_markers.markers.is_empty() {
             return;
         }
-        let start_line = old_text.offset_to_point(range.start).row;
-        let end_line = old_text.offset_to_point(range.end.min(old_text.len())).row;
-        let new_lines = new_text.bytes().filter(|b| *b == b'\n').count();
-        adjust_markers_for_edit(
-            &mut self.gutter_markers.markers,
-            start_line,
-            end_line,
-            new_lines,
-        );
+        let edit = super::LineEdit::new(old_text, range, new_text);
+        adjust_markers_for_line_edit(&mut self.gutter_markers.markers, &edit);
+    }
+}
+
+/// [`adjust_markers_for_edit`] for a [`super::LineEdit`], which also knows
+/// an insertion at column 0 pushes its whole line down: Enter at the start of
+/// a marked line moves the marker with the line, the way the edit log and the
+/// diagnostics move.
+pub fn adjust_markers_for_line_edit(markers: &mut Vec<GutterMarker>, edit: &super::LineEdit) {
+    if !edit.at_line_start {
+        adjust_markers_for_edit(markers, edit.start_line, edit.end_line, edit.new_lines);
+        return;
+    }
+    let line = edit.start_line;
+    let shift = |n: usize| if n >= line { n + edit.new_lines } else { n };
+    for m in markers.iter_mut() {
+        if m.kind == GutterMarkerKind::Deleted {
+            let s = shift(m.lines.start);
+            m.lines = s..s;
+        } else if m.lines.start >= line {
+            m.lines = shift(m.lines.start)..shift(m.lines.end);
+        } else if m.lines.end > line {
+            // Spans the insertion point: grows by the inserted lines.
+            m.lines = m.lines.start..m.lines.end + edit.new_lines;
+        }
     }
 }
 
@@ -450,6 +467,34 @@ mod tests {
             lines(&ms),
             vec![(1..3, Added), (10..12, Modified), (20..20, Deleted)]
         );
+    }
+
+    #[test]
+    fn enter_at_column_zero_moves_the_marker_with_its_line() {
+        let text = Rope::from("a\nb\nc\nd\n");
+        let mut ms = vec![
+            GutterMarker::modified(1..2),
+            GutterMarker::added(0..3),
+            GutterMarker::deleted(1),
+            GutterMarker::added(3..4),
+        ];
+        // Enter at the start of line 1 ("b").
+        let edit = crate::input::LineEdit::new(&text, &(2..2), "\n");
+        adjust_markers_for_line_edit(&mut ms, &edit);
+        assert_eq!(
+            lines(&ms),
+            vec![
+                (2..3, Modified),
+                (0..4, Added),
+                (2..2, Deleted),
+                (4..5, Added)
+            ]
+        );
+        // Mid-line Enter keeps the old behaviour.
+        let mut ms = vec![GutterMarker::modified(1..2)];
+        let edit = crate::input::LineEdit::new(&text, &(3..3), "\n");
+        adjust_markers_for_line_edit(&mut ms, &edit);
+        assert_eq!(lines(&ms), vec![(1..3, Modified)]);
     }
 
     #[test]

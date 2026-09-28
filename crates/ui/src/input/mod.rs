@@ -39,6 +39,7 @@ pub use editing::{
 };
 pub use gutter_marker::{
     GutterMarker, GutterMarkerClick, GutterMarkerKind, adjust_markers_for_edit,
+    adjust_markers_for_line_edit,
 };
 pub use indent::TabSize;
 pub use input::*;
