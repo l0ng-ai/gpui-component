@@ -100,6 +100,12 @@ pub(crate) struct ColumnSelectionState {
     pub(crate) dragging: bool,
 }
 
+/// The most cursors the editor keeps. Past this, select-all-occurrences, a
+/// column selection and the like keep the ones nearest the primary cursor:
+/// every keystroke runs once per cursor, and a buffer full of them would
+/// stall typing.
+pub const MAX_SELECTIONS: usize = 10_000;
+
 /// A selection other than the primary one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ExtraSelection {
@@ -573,9 +579,18 @@ impl InputState {
         merge_selections(all, primary)
     }
 
-    /// Store `selections` back, merged, `primary` into `selected_range`.
+    /// Store `selections` back, merged, `primary` into `selected_range`. Past
+    /// [`MAX_SELECTIONS`], only that many around the primary one are kept.
     fn set_all_selections(&mut self, selections: Vec<ExtraSelection>, primary: usize) {
-        let (mut selections, primary) = merge_selections(selections, primary);
+        let (mut selections, mut primary) = merge_selections(selections, primary);
+        if selections.len() > MAX_SELECTIONS {
+            let start = primary
+                .saturating_sub(MAX_SELECTIONS / 2)
+                .min(selections.len() - MAX_SELECTIONS);
+            selections.truncate(start + MAX_SELECTIONS);
+            selections.drain(..start);
+            primary -= start;
+        }
         let main = selections.remove(primary);
         self.selected_range = main.range;
         self.selection_reversed = main.reversed && !main.range.is_empty();
@@ -972,6 +987,8 @@ impl InputState {
         let tab = self.mode.tab_size();
         let tab_indent = tab.to_string();
 
+        // Its own undo step, not merged into the typing just before it.
+        self.history.break_group();
         self.begin_multi_edit();
         let (mut selections, primary) = self.take_all_selections();
         let rows: std::collections::BTreeSet<usize> = selections
@@ -1024,6 +1041,7 @@ impl InputState {
         self.set_all_selections(selections, primary);
         self.update_preferred_column();
         self.end_multi_edit(cx);
+        self.history.break_group();
         self.pause_blink_cursor(cx);
         cx.notify();
     }
@@ -1887,5 +1905,159 @@ mod tests {
             });
         });
         assert_eq!(events.get(), 2);
+    }
+
+    fn build_in(
+        cx: &mut TestAppContext,
+        language: &'static str,
+        text: &str,
+    ) -> (Entity<InputState>, VisualTestContext) {
+        let mut input: Option<Entity<InputState>> = None;
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.set_global(Theme::default());
+                crate::input::init(cx);
+                input = Some(cx.new(|cx| InputState::new(window, cx).code_editor(language)));
+                cx.new(|cx| Root::new(input.clone().unwrap(), window, cx))
+            })
+            .unwrap()
+        });
+        let input = input.unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let text = text.to_string();
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value(text, window, cx);
+                state.history = crate::history::History::new();
+            });
+        });
+        cx.run_until_parked();
+        (input, cx)
+    }
+
+    #[gpui::test]
+    fn test_ime_committed_bracket_pairs_at_every_cursor(cx: &mut TestAppContext) {
+        let (input, mut cx) = build(cx, "a\nb");
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_selected_ranges([1..1, 3..3], cx);
+                // The IME marks `(` at the primary cursor, then commits it.
+                state.replace_and_mark_text_in_range(None, "(", None, window, cx);
+                assert_eq!(state.value(), "a\nb(");
+                state.replace_text_in_range(None, "(", window, cx);
+                assert_eq!(state.value(), "a()\nb()");
+                assert_eq!(state.selected_ranges(), vec![2..2, 6..6]);
+                state.undo(&Undo, window, cx);
+                assert_eq!(state.value(), "a\nb");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_ime_commits_pair_only_ascii_brackets(cx: &mut TestAppContext) {
+        let (input, mut cx) = build(cx, "x");
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_selected_ranges([1..1], cx);
+                state.replace_and_mark_text_in_range(None, "(", None, window, cx);
+                state.replace_text_in_range(None, "(", window, cx);
+                assert_eq!(state.value(), "x()");
+                assert_eq!(state.selected_range(), 2..2);
+
+                // A full-width bracket from a Chinese IME goes in as it is.
+                state.set_selected_ranges([0..0], cx);
+                state.replace_and_mark_text_in_range(None, "（", None, window, cx);
+                state.replace_text_in_range(None, "（", window, cx);
+                assert_eq!(state.value(), "（x()");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_stepping_over_a_closer_keeps_the_redo_cursor(cx: &mut TestAppContext) {
+        let (input, mut cx) = build(cx, "");
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.replace_text_in_range(None, "(", window, cx);
+                assert_eq!(state.value(), "()");
+                assert_eq!(state.selected_range(), 1..1);
+                // Typing the closer steps over it: no edit.
+                state.replace_text_in_range(None, ")", window, cx);
+                assert_eq!(state.value(), "()");
+                assert_eq!(state.selected_range(), 2..2);
+
+                state.undo(&Undo, window, cx);
+                assert_eq!(state.value(), "");
+                state.redo(&crate::input::Redo, window, cx);
+                assert_eq!(state.value(), "()");
+                // Where the pair left the caret, not where the step-over did.
+                assert_eq!(state.selected_range(), 1..1);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_indent_is_its_own_undo_step(cx: &mut TestAppContext) {
+        let (input, mut cx) = build(cx, "a\nb");
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                // Typing and a quick indent would share one step by time.
+                state.history = crate::history::History::new()
+                    .group_interval(std::time::Duration::from_secs(60));
+                state.set_selected_ranges([1..1, 3..3], cx);
+                state.replace_text_in_range(None, "x", window, cx);
+                assert_eq!(state.value(), "ax\nbx");
+                state.indent(true, window, cx);
+                assert_eq!(state.value(), "  ax\n  bx");
+                state.undo(&Undo, window, cx);
+                assert_eq!(state.value(), "ax\nbx");
+
+                // One cursor: the same.
+                state.set_selected_ranges([0..0], cx);
+                state.replace_text_in_range(None, "y", window, cx);
+                state.outdent(false, window, cx);
+                state.indent(true, window, cx);
+                assert_eq!(state.value(), "  yax\nbx");
+                state.undo(&Undo, window, cx);
+                assert_eq!(state.value(), "yax\nbx");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_select_all_occurrences_is_capped(cx: &mut TestAppContext) {
+        let text = "a ".repeat(MAX_SELECTIONS + 50);
+        let (input, mut cx) = build(cx, &text);
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_selected_ranges([0..0], cx);
+                state.select_all_occurrences(&SelectAllOccurrences, window, cx);
+                assert_eq!(state.selection_count(), MAX_SELECTIONS);
+                assert_eq!(state.selected_range(), 0..1);
+                // ⌘D past the cap adds nothing.
+                state.select_next_occurrence(&SelectNextOccurrence, window, cx);
+                assert!(state.selection_count() <= MAX_SELECTIONS);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_one_scan_per_keystroke(cx: &mut TestAppContext) {
+        // No grammar for Go in these tests: strings and comments come from
+        // the lexer.
+        let (input, mut cx) = build_in(cx, "go", "a\nb\nc\nd\n");
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_selected_ranges([1..1, 3..3, 5..5, 7..7], cx);
+                state.editing.lex_count.set(0);
+                state.replace_text_in_range(None, "(", window, cx);
+                assert_eq!(state.value(), "a()\nb()\nc()\nd()\n");
+                assert!(
+                    state.editing.lex_count.get() <= 1,
+                    "scanned {} times",
+                    state.editing.lex_count.get()
+                );
+            });
+        });
     }
 }

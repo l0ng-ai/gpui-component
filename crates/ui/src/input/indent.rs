@@ -279,6 +279,13 @@ impl InputState {
         let mut added_len = 0;
         let is_selected = !self.selected_range.is_empty();
 
+        // Line-wise: one undo step of its own, one Change event.
+        let line_wise = (is_selected || block) && self.multi_edit.is_none();
+        if line_wise {
+            self.history.break_group();
+            self.begin_multi_edit();
+        }
+
         if is_selected || block {
             let start_offset = self.start_of_line_of_selection(window, cx);
             let mut offset = start_offset;
@@ -324,6 +331,10 @@ impl InputState {
             self.selected_range =
                 (selected_range.start + added_len..selected_range.end + added_len).into();
         }
+        if line_wise {
+            self.end_multi_edit(cx);
+            self.history.break_group();
+        }
         self.record_selections_after_edit();
     }
 
@@ -344,6 +355,14 @@ impl InputState {
         let selected_range = self.selected_range;
         let mut removed_len = 0;
         let is_selected = !self.selected_range.is_empty();
+
+        // Line-wise: one undo step of its own, one Change event.
+        // (Outdent always is: Shift-Tab takes the indent off the line start.)
+        let line_wise = self.multi_edit.is_none();
+        if line_wise {
+            self.history.break_group();
+            self.begin_multi_edit();
+        }
 
         if is_selected || block {
             let start_offset = self.start_of_line_of_selection(window, cx);
@@ -405,6 +424,10 @@ impl InputState {
                 let new_offset = start_offset.saturating_sub(removed_len);
                 self.selected_range = (new_offset..new_offset).into();
             }
+        }
+        if line_wise {
+            self.end_multi_edit(cx);
+            self.history.break_group();
         }
         self.record_selections_after_edit();
     }

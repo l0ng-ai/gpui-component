@@ -17,7 +17,7 @@ mod guides;
 mod lexer;
 mod transform;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -159,6 +159,15 @@ pub(crate) struct EditingState {
     /// Strings and comments found by [`lexer::scan`] for the current text and
     /// language, until the next edit.
     lexed: RefCell<Option<(SharedString, Rc<Vec<Span>>)>>,
+    /// Inside a multi-cursor keystroke the scan is kept across the passes'
+    /// edits instead of being redone for every cursor: it still holds for
+    /// the text before the first byte any pass changed, which is this. The
+    /// passes run last cursor first, so each asks about text before the
+    /// edits already made.
+    lexed_valid_before: Cell<Option<usize>>,
+    /// How many times the whole text was scanned.
+    #[cfg(test)]
+    pub(crate) lex_count: Cell<usize>,
 }
 
 /// Texts larger than this are not lexed as a whole; the line-local guess
@@ -1335,12 +1344,33 @@ impl InputState {
         let mut lexed = self.editing.lexed.borrow_mut();
         if let Some((cached_for, spans)) = lexed.as_ref()
             && *cached_for == language
+            && self.editing.lexed_valid_before.get().is_none()
         {
             return Some(spans.clone());
         }
+        #[cfg(test)]
+        self.editing
+            .lex_count
+            .set(self.editing.lex_count.get() + 1);
         let spans = Rc::new(lexer::scan(&self.text.to_string(), config));
         *lexed = Some((language, spans.clone()));
+        self.editing.lexed_valid_before.set(None);
         Some(spans)
+    }
+
+    /// [`Self::lexed_spans`] for a question about `offset` alone: a scan
+    /// kept through this keystroke's edits answers it while `offset` comes
+    /// before all of them.
+    fn lexed_spans_for(&self, offset: usize, config: &LanguageConfig) -> Option<Rc<Vec<Span>>> {
+        if let Some(valid_before) = self.editing.lexed_valid_before.get()
+            && offset < valid_before
+            && let InputMode::CodeEditor { language, .. } = &self.mode
+            && let Some((cached_for, spans)) = self.editing.lexed.borrow().as_ref()
+            && cached_for == language
+        {
+            return Some(spans.clone());
+        }
+        self.lexed_spans(config)
     }
 
     fn cursor_in_string_or_comment(&self, offset: usize, config: &LanguageConfig) -> bool {
@@ -1349,7 +1379,7 @@ impl InputState {
         {
             return inside;
         }
-        if let Some(spans) = self.lexed_spans(config) {
+        if let Some(spans) = self.lexed_spans_for(offset, config) {
             return lexer::cursor_in_span(&spans, offset);
         }
         let row = self.text.offset_to_point(offset).row;
@@ -1421,16 +1451,67 @@ impl InputState {
         self.pause_blink_cursor(cx);
     }
 
-    fn set_selection_after_edit(&mut self, selection: Range<usize>, cx: &mut Context<Self>) {
+    /// An IME commit of an ASCII bracket or quote pairs like typing it, as
+    /// VS Code does: the marked text goes, and the character is typed in its
+    /// place. Everything else an IME commits (CJK text, full-width
+    /// punctuation) goes in untouched.
+    fn handle_ime_committed_pair(
+        &mut self,
+        range_utf16: Option<&Range<usize>>,
+        new_text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(marked) = self.ime_marked_range else {
+            return false;
+        };
+        let pairable = new_text.len() == 1
+            && new_text
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_punctuation());
+        if self.silent_replace_text
+            || !pairable
+            || !self.mode.is_code_editor()
+            || !self.mode.is_multi_line()
+            || self.disabled
+        {
+            return false;
+        }
+        let marked: Range<usize> = marked.into();
+        if let Some(range_utf16) = range_utf16
+            && self.range_from_utf16(range_utf16) != marked
+        {
+            return false;
+        }
+        let marked_utf16 = self.range_to_utf16(&marked);
+        self.replace_text_in_range_silent(Some(marked_utf16), "", window, cx);
+        // The removal and what replaces it are the one keystroke.
+        self.history.start_grouping();
+        if !self.handle_typed_pair(None, new_text, window, cx) {
+            gpui::EntityInputHandler::replace_text_in_range(self, None, new_text, window, cx);
+        }
+        true
+    }
+
+    /// Put the primary selection at `selection` without touching the undo
+    /// history.
+    fn place_selection(&mut self, selection: Range<usize>, cx: &mut Context<Self>) {
         let len = self.text.len();
         self.selected_range = (selection.start.min(len)..selection.end.min(len)).into();
         self.selection_reversed = false;
         self.selected_word_range = None;
         self.update_preferred_column();
-        self.record_selections_after_edit();
         self.scroll_to(self.cursor(), None, cx);
         self.pause_blink_cursor(cx);
         cx.notify();
+    }
+
+    /// Put the primary selection where an edit just left it, and record that
+    /// as the edit's undo step's "after".
+    fn set_selection_after_edit(&mut self, selection: Range<usize>, cx: &mut Context<Self>) {
+        self.place_selection(selection, cx);
+        self.record_selections_after_edit();
     }
 
     fn selection(&self) -> Range<usize> {
@@ -1712,7 +1793,15 @@ impl InputState {
     /// Carry the editing state through an edit of the text: `range` (before
     /// the edit) was replaced by `new_len` bytes.
     pub(super) fn on_text_edited(&mut self, range: &Range<usize>, new_len: usize) {
-        self.editing.lexed.get_mut().take();
+        if self.multi_edit.is_some() && self.editing.lexed.get_mut().is_some() {
+            let before = self.editing.lexed_valid_before.get().unwrap_or(usize::MAX);
+            self.editing
+                .lexed_valid_before
+                .set(Some(before.min(range.start)));
+        } else {
+            self.editing.lexed.get_mut().take();
+            self.editing.lexed_valid_before.set(None);
+        }
         let pairs = std::mem::take(&mut self.editing.auto_closed);
         self.editing.auto_closed = pairs
             .into_iter()
@@ -1752,6 +1841,9 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.handle_ime_committed_pair(range_utf16, new_text, window, cx) {
+            return true;
+        }
         if self.silent_replace_text || !self.editing_commands_enabled() {
             return false;
         }
@@ -1798,7 +1890,9 @@ impl InputState {
                 if let Some(ix) = tracked {
                     self.editing.auto_closed.remove(ix);
                 }
-                self.set_selection_after_edit(offset..offset, cx);
+                // Only the caret moves: no edit, so the undo step before
+                // keeps the cursors it recorded.
+                self.place_selection(offset..offset, cx);
                 true
             }
             None => false,
@@ -2765,17 +2859,25 @@ mod gpui_tests {
         assert_eq!(cursor(&input, &mut cx), 11);
     }
 
+    /// The marked text is left alone while the IME composes; an ASCII
+    /// bracket it commits pairs like a typed one, as in VS Code.
     #[gpui::test]
-    fn test_ime_composition_is_not_paired(cx: &mut TestAppContext) {
+    fn test_ime_composition_pairs_only_on_commit(cx: &mut TestAppContext) {
         let (input, mut cx) = setup(cx, |s| s.code_editor("rust"));
         set_text(&input, &mut cx, "", 0);
         cx.update(|window, cx| {
             input.update(cx, |state, cx| {
                 state.replace_and_mark_text_in_range(None, "(", None, window, cx);
-                state.replace_text_in_range(None, "(", window, cx);
             });
         });
         assert_eq!(value(&input, &mut cx), "(");
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.replace_text_in_range(None, "(", window, cx);
+            });
+        });
+        assert_eq!(value(&input, &mut cx), "()");
+        assert_eq!(cursor(&input, &mut cx), 1);
     }
 
     #[gpui::test]
