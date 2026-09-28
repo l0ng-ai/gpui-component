@@ -13,12 +13,20 @@
 //! The bindings live in the [`CODE_EDITOR_CONTEXT`] key context, which the input only
 //! declares while it is a multi-line code editor, so none of them reach plain
 //! text fields.
-use std::ops::Range;
+mod guides;
+mod lexer;
+mod transform;
 
-use gpui::{App, Context, KeyBinding, Window, actions};
+use std::cell::RefCell;
+use std::ops::Range;
+use std::rc::Rc;
+
+use gpui::{App, Context, KeyBinding, SharedString, Window, actions};
 use ropey::Rope;
 
 use crate::input::{InputState, RopeExt as _, TabSize, mode::InputMode};
+use lexer::Span;
+use transform::Case;
 
 actions!(
     input,
@@ -45,6 +53,18 @@ actions!(
         SelectLine,
         /// Jump to the bracket matching the one next to the cursor.
         MoveToMatchingBracket,
+        /// Upper-case the selection, or the word under the cursor.
+        TransformToUppercase,
+        /// Lower-case the selection, or the word under the cursor.
+        TransformToLowercase,
+        /// Capitalize every word of the selection, or the word under the cursor.
+        TransformToTitleCase,
+        /// Remove trailing spaces and tabs from every line.
+        TrimTrailingWhitespace,
+        /// Join the selected lines, or the cursor line with the next one.
+        JoinLines,
+        /// Delete the innermost bracket pair around the selection.
+        RemoveSurroundingBrackets,
     ]
 );
 
@@ -82,7 +102,68 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("secondary-l", SelectLine, context),
         KeyBinding::new("secondary-shift-\\", MoveToMatchingBracket, context),
     ]);
+    // VS Code's ⌃J, which has no binding in the editor on macOS. Elsewhere
+    // Ctrl+J is taken (VS Code's panel toggle), so it ships unbound there.
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([KeyBinding::new("ctrl-j", JoinLines, context)]);
 }
+
+/// A pair whose closer was typed for the user, tracked so that only such a
+/// closer is stepped over or deleted along with its opener.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AutoClosedPair {
+    /// Just after the opener.
+    pub start: usize,
+    /// The closer's offset.
+    pub end: usize,
+    pub closer: char,
+}
+
+/// Carry a tracked pair through an edit that replaced `range` with
+/// `new_len` bytes. Edits inside the pair stretch it; an edit touching the
+/// opener or the closer ends the tracking.
+pub(crate) fn map_auto_closed(
+    pair: AutoClosedPair,
+    range: &Range<usize>,
+    new_len: usize,
+) -> Option<AutoClosedPair> {
+    let delta = new_len as isize - range.len() as isize;
+    let shift = |o: usize| (o as isize + delta) as usize;
+    let opener = pair.start.checked_sub(1)?;
+    // Entirely before the opener, an insertion right in front of it included.
+    if range.end <= opener {
+        return Some(AutoClosedPair {
+            start: shift(pair.start),
+            end: shift(pair.end),
+            ..pair
+        });
+    }
+    // Entirely after the closer.
+    if range.start > pair.end {
+        return Some(pair);
+    }
+    // Between the two, an insertion at either end of the inside included.
+    if range.start >= pair.start && range.end <= pair.end {
+        return Some(AutoClosedPair {
+            end: shift(pair.end),
+            ..pair
+        });
+    }
+    None
+}
+
+/// Editing state the commands keep between keystrokes.
+#[derive(Default)]
+pub(crate) struct EditingState {
+    auto_closed: Vec<AutoClosedPair>,
+    /// Strings and comments found by [`lexer::scan`] for the current text and
+    /// language, until the next edit.
+    lexed: RefCell<Option<(SharedString, Rc<Vec<Span>>)>>,
+}
+
+/// Texts larger than this are not lexed as a whole; the line-local guess
+/// stands in.
+const MAX_LEX_LEN: usize = 2 * 1024 * 1024;
 
 /// One contiguous replacement plus the selection to put down after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +225,9 @@ pub(crate) struct LanguageConfig {
     pub block_comment: Option<(&'static str, &'static str)>,
     /// Quote characters that auto-close and delimit strings.
     pub quotes: &'static [char],
+    /// Whether `"` and `'` strings may run across lines (backtick ones
+    /// always may).
+    pub multi_line_strings: bool,
 }
 
 impl LanguageConfig {
@@ -151,6 +235,7 @@ impl LanguageConfig {
         line_comment: None,
         block_comment: None,
         quotes: &[],
+        multi_line_strings: false,
     };
 
     fn pairs_quote(&self, c: char) -> bool {
@@ -173,16 +258,21 @@ pub(crate) fn language_config(language: &str) -> LanguageConfig {
         line_comment: Some("//"),
         block_comment: C_BLOCK,
         quotes,
+        multi_line_strings: false,
     };
     let hash = |quotes| LanguageConfig {
         line_comment: Some("#"),
         block_comment: None,
         quotes,
+        multi_line_strings: false,
     };
 
     match language.to_ascii_lowercase().as_str() {
         // Single quotes are lifetimes far more often than char literals.
-        "rust" | "rs" => c_like(DQ),
+        "rust" | "rs" => LanguageConfig {
+            multi_line_strings: true,
+            ..c_like(DQ)
+        },
         "javascript" | "js" | "jsx" | "typescript" | "ts" | "tsx" | "mjs" | "cjs" => {
             c_like(ALL_QUOTES)
         }
@@ -193,44 +283,53 @@ pub(crate) fn language_config(language: &str) -> LanguageConfig {
             line_comment: Some("//"),
             block_comment: None,
             quotes: DQ_SQ,
+            multi_line_strings: false,
         },
         "json" | "jsonc" | "json5" => c_like(DQ),
         "python" | "py" | "ruby" | "rb" | "perl" | "r" | "nix" | "elixir" | "ex" | "exs"
         | "dockerfile" | "conf" | "ini" => hash(DQ_SQ),
-        "bash" | "sh" | "shell" | "zsh" | "fish" | "make" | "makefile" | "cmake" => {
-            hash(ALL_QUOTES)
-        }
+        "bash" | "sh" | "shell" | "zsh" | "fish" => LanguageConfig {
+            multi_line_strings: true,
+            ..hash(ALL_QUOTES)
+        },
+        "make" | "makefile" | "cmake" => hash(ALL_QUOTES),
         "toml" | "yaml" | "yml" | "graphql" | "gql" => hash(DQ_SQ),
         "sql" | "haskell" | "hs" | "elm" => LanguageConfig {
             line_comment: Some("--"),
             block_comment: C_BLOCK,
             quotes: DQ_SQ,
+            multi_line_strings: false,
         },
         "lua" => LanguageConfig {
             line_comment: Some("--"),
             block_comment: Some(("--[[", "]]")),
             quotes: DQ_SQ,
+            multi_line_strings: false,
         },
         "lisp" | "clojure" | "scheme" | "elisp" => LanguageConfig {
             line_comment: Some(";"),
             block_comment: None,
             quotes: DQ,
+            multi_line_strings: false,
         },
         "erlang" | "latex" | "tex" => LanguageConfig {
             line_comment: Some("%"),
             block_comment: None,
             quotes: DQ,
+            multi_line_strings: false,
         },
         "css" => LanguageConfig {
             line_comment: None,
             block_comment: C_BLOCK,
             quotes: DQ_SQ,
+            multi_line_strings: false,
         },
         "html" | "htm" | "xml" | "svg" | "vue" | "svelte" | "astro" | "erb" | "ejs" => {
             LanguageConfig {
                 line_comment: None,
                 block_comment: XML_BLOCK,
                 quotes: DQ_SQ,
+                multi_line_strings: false,
             }
         }
         // Prose: an apostrophe or a quote mark should never grow a twin.
@@ -238,12 +337,14 @@ pub(crate) fn language_config(language: &str) -> LanguageConfig {
             line_comment: None,
             block_comment: XML_BLOCK,
             quotes: &['`'],
+            multi_line_strings: false,
         },
         "text" | "plain" | "plaintext" | "diff" | "" => LanguageConfig::PLAIN,
         _ => LanguageConfig {
             line_comment: None,
             block_comment: None,
             quotes: DQ_SQ,
+            multi_line_strings: false,
         },
     }
 }
@@ -805,6 +906,42 @@ pub(crate) fn insert_line(text: &Rope, cursor: usize, above: bool) -> EditPlan {
     }
 }
 
+/// Open an empty line below (or above) the line of every cursor, once per
+/// line however many cursors are on it. Each cursor lands on its line's new
+/// line.
+pub(crate) fn insert_lines(text: &Rope, heads: &[usize], above: bool) -> Option<LinesPlan> {
+    let head_rows: Vec<usize> = heads
+        .iter()
+        .map(|&head| text.offset_to_point(head).row)
+        .collect();
+    let mut rows = head_rows.clone();
+    rows.sort_unstable();
+    rows.dedup();
+    let plans: Vec<EditPlan> = rows
+        .iter()
+        .map(|&row| insert_line(text, text.line_start_offset(row), above))
+        .collect();
+    let edits: Vec<(Range<usize>, String)> = plans
+        .iter()
+        .map(|plan| (plan.range.clone(), plan.new_text.clone()))
+        .collect();
+    let (range, new_text) = compose_text(text, &edits)?;
+    let selections = head_rows
+        .iter()
+        .map(|row| {
+            let k = rows.binary_search(row).unwrap_or(0);
+            let before: usize = edits[..k].iter().map(|(_, t)| t.len()).sum();
+            let caret = plans[k].selection.start + before;
+            caret..caret
+        })
+        .collect();
+    Some(LinesPlan {
+        range,
+        new_text,
+        selections,
+    })
+}
+
 /// The whole lines under the selection, newline included. A selection that
 /// already is exactly that grows by the next line.
 pub(crate) fn select_lines(text: &Rope, selection: &Range<usize>) -> Range<usize> {
@@ -832,12 +969,15 @@ pub(crate) fn select_lines(text: &Rope, selection: &Range<usize>) -> Range<usize
 ///
 /// `in_string` says whether the cursor sits inside a string or comment; it
 /// only suppresses quote pairing, as brackets are paired everywhere.
+/// `overtype` says the character right after the cursor is a closer that was
+/// auto-inserted; only such a closer is stepped over.
 pub(crate) fn auto_pair(
     text: &Rope,
     selection: &Range<usize>,
     typed: &str,
     config: &LanguageConfig,
     in_string: bool,
+    overtype: bool,
 ) -> Option<Typed> {
     let mut chars = typed.chars();
     let c = chars.next()?;
@@ -860,10 +1000,8 @@ pub(crate) fn auto_pair(
     let at = selection.start;
     let next = char_after(text, at);
 
-    // Step over a closer that is already there. A quote is only stepped
-    // over from inside its string, so a cursor in front of a string that
-    // opens with the same quote still types one.
-    if next == Some(c) && (is_closer(c) || (is_quote && in_string)) {
+    // Step over a closer that was typed for the user.
+    if overtype && next == Some(c) && (is_closer(c) || is_quote) {
         return Some(Typed::Skip(at + c.len_utf8()));
     }
 
@@ -1182,11 +1320,35 @@ impl InputState {
         highlighter.tree().map(f)
     }
 
+    /// Strings and comments by [`lexer::scan`], for a text with no syntax
+    /// tree; cached until the next edit.
+    fn lexed_spans(&self, config: &LanguageConfig) -> Option<Rc<Vec<Span>>> {
+        if self.text.len() > MAX_LEX_LEN {
+            return None;
+        }
+        let language = match &self.mode {
+            InputMode::CodeEditor { language, .. } => language.clone(),
+            _ => return None,
+        };
+        let mut lexed = self.editing.lexed.borrow_mut();
+        if let Some((cached_for, spans)) = lexed.as_ref()
+            && *cached_for == language
+        {
+            return Some(spans.clone());
+        }
+        let spans = Rc::new(lexer::scan(&self.text.to_string(), config));
+        *lexed = Some((language, spans.clone()));
+        Some(spans)
+    }
+
     fn cursor_in_string_or_comment(&self, offset: usize, config: &LanguageConfig) -> bool {
         if let Some(inside) =
             self.with_syntax_tree(|tree| tree_cursor_in_string_or_comment(tree, offset))
         {
             return inside;
+        }
+        if let Some(spans) = self.lexed_spans(config) {
+            return lexer::cursor_in_span(&spans, offset);
         }
         let row = self.text.offset_to_point(offset).row;
         let prefix = self
@@ -1417,9 +1579,15 @@ impl InputState {
             cx.propagate();
             return;
         }
-        self.edit_each_cursor(window, cx, |this| {
-            Some(insert_line(&this.text, this.cursor(), above))
-        });
+        let (selections, primary) = self.all_selections();
+        let heads: Vec<usize> = selections
+            .iter()
+            .enumerate()
+            .map(|(ix, s)| if ix == primary { self.cursor() } else { s.end })
+            .collect();
+        if let Some(plan) = insert_lines(&self.text, &heads, above) {
+            self.apply_lines_plan(plan, primary, window, cx);
+        }
     }
 
     pub(super) fn insert_line_below(
@@ -1492,6 +1660,11 @@ impl InputState {
             return pair;
         }
         let text = &self.text;
+        if let Some(spans) = self.lexed_spans(&config) {
+            return bracket_pair_at(text, cursor, &|offset| {
+                lexer::offset_in_span(&spans, offset)
+            });
+        }
         let skip = |offset: usize| {
             let row = text.offset_to_point(offset).row;
             let line_start = text.line_start_offset(row);
@@ -1504,19 +1677,66 @@ impl InputState {
         bracket_pair_at(text, cursor, &skip)
     }
 
-    /// The byte ranges of the bracket next to the caret and its match, for the
-    /// element to highlight. Empty unless the caret is a bare cursor.
+    /// The byte ranges of the bracket next to each bare cursor and its
+    /// match, for the element to highlight.
     pub(super) fn bracket_highlight_ranges(&self) -> Vec<Range<usize>> {
-        if !self.mode.is_code_editor() || !self.selected_range.is_empty() {
+        /// Past this many cursors, only the primary one is highlighted.
+        const MAX_CURSORS: usize = 64;
+        if !self.mode.is_code_editor() || self.ime_marked_range.is_some() {
             return vec![];
         }
-        if self.ime_marked_range.is_some() {
-            return vec![];
+        let primary = self.selection();
+        let cursors: Vec<usize> = if self.extra_selections.len() < MAX_CURSORS {
+            self.selected_ranges()
+                .into_iter()
+                .filter(|r| r.is_empty())
+                .map(|r| r.start)
+                .collect()
+        } else if primary.is_empty() {
+            vec![primary.start]
+        } else {
+            vec![]
+        };
+        let mut ranges: Vec<Range<usize>> = cursors
+            .into_iter()
+            .filter_map(|cursor| self.bracket_pair_near(cursor))
+            .flat_map(|(open, close)| [open..open + 1, close..close + 1])
+            .collect();
+        ranges.sort_by_key(|r| r.start);
+        ranges.dedup();
+        ranges
+    }
+
+    /// Carry the editing state through an edit of the text: `range` (before
+    /// the edit) was replaced by `new_len` bytes.
+    pub(super) fn on_text_edited(&mut self, range: &Range<usize>, new_len: usize) {
+        self.editing.lexed.get_mut().take();
+        let pairs = std::mem::take(&mut self.editing.auto_closed);
+        self.editing.auto_closed = pairs
+            .into_iter()
+            .filter_map(|pair| map_auto_closed(pair, range, new_len))
+            .collect();
+    }
+
+    /// Stop tracking the auto-inserted closers no cursor is inside any more.
+    pub(super) fn prune_auto_closed(&mut self) {
+        if self.editing.auto_closed.is_empty() || self.multi_edit.is_some() {
+            return;
         }
-        match self.bracket_pair_near(self.cursor()) {
-            Some((open, close)) => vec![open..open + 1, close..close + 1],
-            None => vec![],
-        }
+        let cursors = self.selected_ranges();
+        self.editing.auto_closed.retain(|pair| {
+            cursors
+                .iter()
+                .any(|c| pair.start <= c.start && c.end <= pair.end)
+        });
+    }
+
+    /// The tracked pair whose closer sits right at `cursor`.
+    fn auto_closed_at(&self, cursor: usize) -> Option<usize> {
+        self.editing
+            .auto_closed
+            .iter()
+            .position(|pair| pair.end == cursor && self.text.char_at(cursor) == Some(pair.closer))
     }
 
     /// Handle a typed character for bracket and quote pairing.
@@ -1539,16 +1759,43 @@ impl InputState {
         {
             return false;
         }
+        if self.multi_edit.is_none() {
+            self.prune_auto_closed();
+        }
         let config = self.editing_language();
         let in_string = self.cursor_in_string_or_comment(selection.start, &config);
-        match auto_pair(&self.text, &selection, new_text, &config, in_string) {
+        let tracked = selection
+            .is_empty()
+            .then(|| self.auto_closed_at(selection.start))
+            .flatten();
+        match auto_pair(
+            &self.text,
+            &selection,
+            new_text,
+            &config,
+            in_string,
+            tracked.is_some(),
+        ) {
             Some(Typed::Edit(plan)) => {
+                let inserted_pair = selection.is_empty() && plan.range.is_empty();
+                let closer = plan.new_text.chars().nth(1);
                 let range_utf16 = self.range_to_utf16(&plan.range);
                 self.replace_text_in_range_silent(Some(range_utf16), &plan.new_text, window, cx);
+                if inserted_pair && let Some(closer) = closer {
+                    let inside = plan.selection.start;
+                    self.editing.auto_closed.push(AutoClosedPair {
+                        start: inside,
+                        end: inside,
+                        closer,
+                    });
+                }
                 self.set_selection_after_edit(plan.selection, cx);
                 true
             }
             Some(Typed::Skip(offset)) => {
+                if let Some(ix) = tracked {
+                    self.editing.auto_closed.remove(ix);
+                }
                 self.set_selection_after_edit(offset..offset, cx);
                 true
             }
@@ -1565,12 +1812,122 @@ impl InputState {
         if !self.editing_commands_enabled() || !self.selected_range.is_empty() {
             return false;
         }
-        let Some(range) = backspace_pair(&self.text, self.cursor()) else {
+        if self.multi_edit.is_none() {
+            self.prune_auto_closed();
+        }
+        // Only a pair whose closer was typed for the user, and still empty.
+        let cursor = self.cursor();
+        let Some(ix) = self.auto_closed_at(cursor) else {
             return false;
         };
+        if self.editing.auto_closed[ix].start != cursor {
+            return false;
+        }
+        let Some(range) = backspace_pair(&self.text, cursor) else {
+            return false;
+        };
+        self.editing.auto_closed.remove(ix);
         let range_utf16 = self.range_to_utf16(&range);
         self.replace_text_in_range_silent(Some(range_utf16), "", window, cx);
         true
+    }
+
+    fn transform_case_action(&mut self, case: Case, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.editing_commands_enabled() {
+            cx.propagate();
+            return;
+        }
+        self.edit_each_cursor(window, cx, |this| {
+            transform::case_plan(&this.text, &this.selection(), case)
+        });
+    }
+
+    pub(super) fn transform_to_uppercase(
+        &mut self,
+        _: &TransformToUppercase,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.transform_case_action(Case::Upper, window, cx);
+    }
+
+    pub(super) fn transform_to_lowercase(
+        &mut self,
+        _: &TransformToLowercase,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.transform_case_action(Case::Lower, window, cx);
+    }
+
+    pub(super) fn transform_to_title_case(
+        &mut self,
+        _: &TransformToTitleCase,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.transform_case_action(Case::Title, window, cx);
+    }
+
+    pub(super) fn trim_trailing_whitespace_action(
+        &mut self,
+        _: &TrimTrailingWhitespace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.editing_commands_enabled() {
+            cx.propagate();
+            return;
+        }
+        let (selections, primary) = self.all_selections();
+        if let Some(plan) = transform::trim_trailing_whitespace(&self.text, &selections) {
+            self.apply_lines_plan(plan, primary, window, cx);
+        }
+    }
+
+    pub(super) fn join_lines_action(
+        &mut self,
+        _: &JoinLines,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.editing_commands_enabled() {
+            cx.propagate();
+            return;
+        }
+        let (selections, primary) = self.all_selections();
+        if let Some(plan) = transform::join_lines(&self.text, &selections) {
+            self.apply_lines_plan(plan, primary, window, cx);
+        }
+    }
+
+    pub(super) fn remove_surrounding_brackets(
+        &mut self,
+        _: &RemoveSurroundingBrackets,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.editing_commands_enabled() {
+            cx.propagate();
+            return;
+        }
+        let config = self.editing_language();
+        self.edit_each_cursor(window, cx, |this| {
+            let selection = this.selection();
+            if let Some(plan) = this.with_syntax_tree(|tree| {
+                transform::unwrap_brackets(&this.text, &selection, &|offset| {
+                    tree_offset_in_string_or_comment(tree, offset)
+                })
+            }) {
+                return plan;
+            }
+            match this.lexed_spans(&config) {
+                Some(spans) => transform::unwrap_brackets(&this.text, &selection, &|offset| {
+                    lexer::offset_in_span(&spans, offset)
+                }),
+                None => transform::unwrap_brackets(&this.text, &selection, &|_| false),
+            }
+        });
     }
 
     /// Enter after an opening bracket opens an indented block.
@@ -1881,6 +2238,15 @@ mod tests {
     }
 
     fn typed(m: &str, c: &str, lang: &str) -> Option<String> {
+        typed_with(m, c, lang, false)
+    }
+
+    /// `typed`, with the character after the cursor an auto-inserted closer.
+    fn typed_over(m: &str, c: &str, lang: &str) -> Option<String> {
+        typed_with(m, c, lang, true)
+    }
+
+    fn typed_with(m: &str, c: &str, lang: &str, overtype: bool) -> Option<String> {
         let (text, selection) = parse(m);
         let rope = Rope::from(text.as_str());
         let config = language_config(lang);
@@ -1889,7 +2255,7 @@ mod tests {
             .slice(rope.line_start_offset(row)..selection.start)
             .to_string();
         let in_string = prefix_in_string_or_comment(&prefix, &config);
-        match auto_pair(&rope, &selection, c, &config, in_string)? {
+        match auto_pair(&rope, &selection, c, &config, in_string, overtype)? {
             Typed::Edit(plan) => Some(mark(&plan.apply(&text), &plan.selection)),
             Typed::Skip(offset) => Some(mark(&text, &(offset..offset))),
         }
@@ -1911,11 +2277,13 @@ mod tests {
 
     #[test]
     fn test_auto_pair_overtype() {
-        assert_eq!(typed("foo(|)", ")", "rust").unwrap(), "foo()|");
-        assert_eq!(typed("[1, 2|]", "]", "rust").unwrap(), "[1, 2]|");
-        assert_eq!(typed("\"abc|\"", "\"", "rust").unwrap(), "\"abc\"|");
+        assert_eq!(typed_over("foo(|)", ")", "rust").unwrap(), "foo()|");
+        assert_eq!(typed_over("[1, 2|]", "]", "rust").unwrap(), "[1, 2]|");
+        assert_eq!(typed_over("\"abc|\"", "\"", "rust").unwrap(), "\"abc\"|");
+        // A closer the user typed is not stepped over.
+        assert_eq!(typed("foo(|)", ")", "rust"), None);
         // A closer with nothing to step over is a plain insert.
-        assert_eq!(typed("foo|", ")", "rust"), None);
+        assert_eq!(typed_over("foo|", ")", "rust"), None);
         // A quote in front of a string opens a new one instead of skipping.
         assert_eq!(typed("x = |\"a\"", "\"", "rust"), None);
     }
@@ -2180,6 +2548,48 @@ mod tests {
     }
 
     #[test]
+    fn test_map_auto_closed() {
+        // `(|)`: inside starts and ends at 1, the closer at 1.
+        let pair = AutoClosedPair {
+            start: 1,
+            end: 1,
+            closer: ')',
+        };
+        let map = |range: Range<usize>, len: usize| map_auto_closed(pair, &range, len);
+        // Typing inside stretches it.
+        assert_eq!(map(1..1, 3).map(|p| (p.start, p.end)), Some((1, 4)));
+        // Typing in front of the opener shifts it.
+        assert_eq!(map(0..0, 2).map(|p| (p.start, p.end)), Some((3, 3)));
+        // Typing after the closer leaves it alone.
+        assert_eq!(map(2..2, 1), Some(pair));
+        // Deleting the opener or the closer ends it.
+        assert_eq!(map(0..1, 0), None);
+        assert_eq!(map(1..2, 0), None);
+        // A deletion inside a wider pair shrinks it.
+        let wide = AutoClosedPair {
+            start: 1,
+            end: 4,
+            closer: ')',
+        };
+        assert_eq!(
+            map_auto_closed(wide, &(2..4), 0).map(|p| (p.start, p.end)),
+            Some((1, 2))
+        );
+    }
+
+    #[test]
+    fn test_insert_lines_dedupes_per_line() {
+        let text = Rope::from("  ab\ncd");
+        let plan = insert_lines(&text, &[2, 3, 6], false).unwrap();
+        let out = plan.apply("  ab\ncd");
+        assert_eq!(out, "  ab\n  \ncd\n");
+        assert_eq!(plan.selections, vec![7..7, 7..7, 11..11]);
+        let plan = insert_lines(&text, &[2, 3], true).unwrap();
+        assert_eq!(plan.apply("  ab\ncd"), "  \n  ab\ncd");
+        assert_eq!(plan.selections, vec![2..2, 2..2]);
+    }
+
+    #[test]
     fn test_map_offset() {
         let edits = vec![(2..2, "xx".to_string()), (5..7, String::new())];
         assert_eq!(map_offset(&edits, 0, true), 0);
@@ -2400,6 +2810,78 @@ mod gpui_tests {
         assert_eq!(ranges(&mut cx), vec![2..2, 6..6]);
         cx.simulate_keystrokes("backspace");
         assert_eq!(value(&input, &mut cx), "f\ng");
+    }
+
+    #[gpui::test]
+    fn test_only_auto_inserted_closers_are_special(cx: &mut TestAppContext) {
+        let (input, mut cx) = setup(cx, |s| s.code_editor("rust"));
+        // A closer the user typed is not stepped over, nor deleted with its
+        // opener.
+        set_text(&input, &mut cx, "f()", 2);
+        cx.simulate_input(")");
+        assert_eq!(value(&input, &mut cx), "f())");
+        set_text(&input, &mut cx, "f()", 2);
+        cx.simulate_keystrokes("backspace");
+        assert_eq!(value(&input, &mut cx), "f)");
+
+        // Nested auto-inserted closers are stepped over one by one.
+        set_text(&input, &mut cx, "", 0);
+        cx.simulate_input("f((x");
+        assert_eq!(value(&input, &mut cx), "f((x))");
+        cx.simulate_input("))");
+        assert_eq!(value(&input, &mut cx), "f((x))");
+        assert_eq!(cursor(&input, &mut cx), 6);
+
+        // Once the caret has left the pair, its closer is an ordinary one.
+        set_text(&input, &mut cx, "", 0);
+        cx.simulate_input("g(");
+        cx.simulate_keystrokes("left left");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("right right");
+        cx.run_until_parked();
+        cx.simulate_input(")");
+        assert_eq!(value(&input, &mut cx), "g())");
+    }
+
+    #[gpui::test]
+    fn test_bracket_highlight_at_every_cursor(cx: &mut TestAppContext) {
+        let (input, mut cx) = setup(cx, |s| s.code_editor("rust"));
+        // No syntax tree here: the lexer keeps the `(` in the string out.
+        set_text(&input, &mut cx, "a(\"(\")\nb[1]", 0);
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| state.set_selected_ranges([1..1, 9..9], cx));
+        });
+        let ranges = cx.update(|_, cx| input.read(cx).bracket_highlight_ranges());
+        assert_eq!(ranges, vec![1..2, 5..6, 8..9, 10..11]);
+    }
+
+    #[gpui::test]
+    fn test_text_commands(cx: &mut TestAppContext) {
+        let (input, mut cx) = setup(cx, |s| s.code_editor("rust"));
+        set_text(&input, &mut cx, "let foo = 1;  \nbar", 5);
+        cx.dispatch_action(super::TransformToUppercase);
+        assert_eq!(value(&input, &mut cx), "let FOO = 1;  \nbar");
+        cx.dispatch_action(super::TrimTrailingWhitespace);
+        assert_eq!(value(&input, &mut cx), "let FOO = 1;\nbar");
+        cx.dispatch_action(super::JoinLines);
+        assert_eq!(value(&input, &mut cx), "let FOO = 1; bar");
+        undo(&input, &mut cx);
+        assert_eq!(value(&input, &mut cx), "let FOO = 1;\nbar");
+
+        set_text(&input, &mut cx, "x(a)\ny(b)", 2);
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| state.set_selected_ranges([2..2, 7..7], cx));
+        });
+        cx.dispatch_action(super::RemoveSurroundingBrackets);
+        assert_eq!(value(&input, &mut cx), "xa\nyb");
+
+        // Two cursors on one line open one new line.
+        set_text(&input, &mut cx, "ab\ncd", 0);
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| state.set_selected_ranges([0..0, 1..1], cx));
+        });
+        cx.simulate_keystrokes(&secondary("enter"));
+        assert_eq!(value(&input, &mut cx), "ab\n\ncd");
     }
 
     #[test]

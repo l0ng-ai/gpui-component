@@ -1532,6 +1532,8 @@ pub(super) struct PrepaintState {
     document_color_paths: Vec<(Path<Pixels>, Hsla)>,
     hover_definition_hitbox: Option<Hitbox>,
     indent_guides_path: Option<Path<Pixels>>,
+    /// The guide of the scope the caret is in, drawn over the others.
+    active_indent_guide_path: Option<Path<Pixels>>,
     bounds: Bounds<Pixels>,
     /// Fold icon layout data
     fold_icon_layout: FoldIconLayout,
@@ -1798,6 +1800,7 @@ impl Element for TextElement {
         self.state.update(cx, |state, cx| {
             state.display_map.set_font(font, text_size, cx);
             state.display_map.ensure_text_prepared(&state.text, cx);
+            state.prune_auto_closed();
         });
 
         let state = self.state.read(cx);
@@ -2182,6 +2185,8 @@ impl Element for TextElement {
         let hover_definition_hitbox = self.layout_hover_definition_hitbox(state, window, cx);
         let indent_guides_path =
             self.layout_indent_guides(state, &bounds, &last_layout, &text_style, window);
+        let active_indent_guide_path =
+            self.layout_active_indent_guide(state, &bounds, &last_layout, &text_style, window);
         state
             .editor_scrollbar_snapshot
             .set(Some(EditorScrollbarSnapshot::new(
@@ -2212,6 +2217,7 @@ impl Element for TextElement {
             hover_definition_hitbox,
             document_color_paths,
             indent_guides_path,
+            active_indent_guide_path,
             fold_icon_layout,
             ghost_first_line,
             ghost_lines,
@@ -2337,6 +2343,9 @@ impl Element for TextElement {
             // Paint indent guides
             if let Some(path) = prepaint.indent_guides_path.take() {
                 window.paint_path(path, cx.theme().border.opacity(0.85));
+            }
+            if let Some(path) = prepaint.active_indent_guide_path.take() {
+                window.paint_path(path, cx.theme().muted_foreground.opacity(0.45));
             }
 
             for path in prepaint.bracket_match_paths.drain(..) {

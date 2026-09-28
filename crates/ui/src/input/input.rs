@@ -351,6 +351,26 @@ impl RenderOnce for Input {
                         .on_action(window.listener_for(&self.state, InputState::delete_line))
                         .on_action(window.listener_for(&self.state, InputState::insert_line_below))
                         .on_action(window.listener_for(&self.state, InputState::insert_line_above))
+                        .on_action(
+                            window.listener_for(&self.state, InputState::transform_to_uppercase),
+                        )
+                        .on_action(
+                            window.listener_for(&self.state, InputState::transform_to_lowercase),
+                        )
+                        .on_action(
+                            window.listener_for(&self.state, InputState::transform_to_title_case),
+                        )
+                        .on_action(
+                            window.listener_for(
+                                &self.state,
+                                InputState::trim_trailing_whitespace_action,
+                            ),
+                        )
+                        .on_action(window.listener_for(&self.state, InputState::join_lines_action))
+                        .on_action(
+                            window
+                                .listener_for(&self.state, InputState::remove_surrounding_brackets),
+                        )
                     })
             })
             .when(state.mode.is_code_editor(), |this| {
