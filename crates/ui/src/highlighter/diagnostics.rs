@@ -283,6 +283,82 @@ impl DiagnosticSet {
         }
     }
 
+    /// Replaces every diagnostic with `diagnostics`, measured against `text`
+    /// — what a language server publishing a fresh set asks for. Entries are
+    /// kept in document order whatever order they arrive in, which seeking
+    /// by offset relies on.
+    pub fn replace_all<D, I>(&mut self, text: &Rope, diagnostics: D)
+    where
+        D: IntoIterator<Item = I>,
+        I: Into<Diagnostic>,
+    {
+        self.text = text.clone();
+        let mut entries: Vec<DiagnosticEntry> = diagnostics
+            .into_iter()
+            .map(|d| {
+                let diagnostic = d.into();
+                let start = self.text.position_to_offset(&diagnostic.range.start);
+                let end = self.text.position_to_offset(&diagnostic.range.end);
+                DiagnosticEntry {
+                    range: start..end.max(start),
+                    diagnostic,
+                }
+            })
+            .collect();
+        entries.sort_by_key(|e| (e.range.start, e.range.end));
+        self.diagnostics = SumTree::from_iter(entries, &());
+    }
+
+    /// Carries the diagnostics through an edit that replaced the bytes in
+    /// `range` with `new_len` bytes, `text` being the text after it.
+    ///
+    /// A diagnostic before the edit stays put, one after it moves with the
+    /// text, and one the edit lands inside stretches or shrinks to fit. One
+    /// whose whole span was deleted is dropped. The server publishes a fresh
+    /// set once it has seen the edit; until then the underlines stay under
+    /// the code they were about instead of vanishing on every keystroke.
+    pub fn edit(&mut self, range: &Range<usize>, new_len: usize, text: &Rope) {
+        let new_end = range.start + new_len;
+        let map_start = |p: usize| {
+            if p < range.start {
+                p
+            } else if p >= range.end {
+                p - range.end + new_end
+            } else {
+                // Inside what was replaced: the start of what replaced it.
+                range.start
+            }
+        };
+        let map_end = |p: usize| {
+            if p <= range.start {
+                p
+            } else if p >= range.end {
+                p - range.end + new_end
+            } else {
+                new_end
+            }
+        };
+        self.text = text.clone();
+        let len = text.len();
+        let mut entries = Vec::with_capacity(self.len());
+        for entry in self.diagnostics.iter() {
+            let was_empty = entry.range.is_empty();
+            let start = map_start(entry.range.start).min(len);
+            let end = map_end(entry.range.end).min(len).max(start);
+            if start == end && !was_empty {
+                continue;
+            }
+            let mut diagnostic = entry.diagnostic.clone();
+            diagnostic.range = text.offset_to_position(start)..text.offset_to_position(end);
+            entries.push(DiagnosticEntry {
+                range: start..end,
+                diagnostic,
+            });
+        }
+        entries.sort_by_key(|e| (e.range.start, e.range.end));
+        self.diagnostics = SumTree::from_iter(entries, &());
+    }
+
     pub fn len(&self) -> usize {
         self.diagnostics.summary().count
     }
@@ -391,5 +467,43 @@ mod tests {
 
         diagnostics.clear();
         assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn diagnostics_follow_the_text_through_edits() {
+        use ropey::Rope;
+
+        use super::{Diagnostic, DiagnosticSet};
+
+        let mut text = Rope::from("let a = 1;\nlet bad = 2;\n");
+        let mut diagnostics = DiagnosticSet::new(&text);
+        diagnostics.replace_all(
+            &text,
+            vec![
+                Diagnostic::new(Position::new(1, 4)..Position::new(1, 7), "second"),
+                Diagnostic::new(Position::new(0, 4)..Position::new(0, 5), "first"),
+            ],
+        );
+        let ranges = |d: &DiagnosticSet| d.iter().map(|e| e.range.clone()).collect::<Vec<_>>();
+        // Sorted however they arrived.
+        assert_eq!(ranges(&diagnostics), [4..5, 15..18]);
+
+        // Typing on the first line pushes the second one along.
+        text = Rope::from("// x\nlet a = 1;\nlet bad = 2;\n");
+        diagnostics.edit(&(0..0), 5, &text);
+        assert_eq!(ranges(&diagnostics), [9..10, 20..23]);
+        let second = diagnostics.iter().nth(1).unwrap();
+        assert_eq!(second.diagnostic.range.start, Position::new(2, 4));
+
+        // Typing inside `bad` stretches its underline.
+        text = Rope::from("// x\nlet a = 1;\nlet bXYad = 2;\n");
+        diagnostics.edit(&(21..21), 2, &text);
+        assert_eq!(ranges(&diagnostics), [9..10, 20..25]);
+
+        // Deleting all of `a` drops its diagnostic.
+        text = Rope::from("// x\nlet  = 1;\nlet bXYad = 2;\n");
+        diagnostics.edit(&(9..10), 0, &text);
+        assert_eq!(ranges(&diagnostics), [19..24]);
+        assert_eq!(diagnostics.iter().next().unwrap().message.as_str(), "second");
     }
 }

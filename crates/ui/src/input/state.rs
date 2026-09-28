@@ -2952,7 +2952,11 @@ impl EntityInputHandler for InputState {
             self.history.end_grouping();
         }
         if let Some(diagnostics) = self.mode.diagnostics_mut() {
-            diagnostics.reset(&self.text)
+            if mask_changed {
+                diagnostics.reset(&self.text)
+            } else {
+                diagnostics.edit(&range, new_text.len(), &self.text)
+            }
         }
         // Adjust folds before updating wrap map: remove overlapping folds and shift others
         self.display_map
@@ -3028,7 +3032,7 @@ impl EntityInputHandler for InputState {
         }
 
         if let Some(diagnostics) = self.mode.diagnostics_mut() {
-            diagnostics.reset(&self.text)
+            diagnostics.edit(&range, new_text.len(), &self.text)
         }
         // Adjust folds before updating wrap map: remove overlapping folds and shift others
         self.display_map
