@@ -394,8 +394,6 @@ impl Element for Inline {
         };
 
         let text_layout = self.styled_text.layout().clone();
-        self.styled_text
-            .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
 
         // layout selections
         let (is_selectable, is_selection, selection) =
@@ -413,9 +411,13 @@ impl Element for Inline {
             window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
         }
 
+        // Under the glyphs, not over them: a host theme's selection color
+        // may be opaque, and painted last it would hide the text it selects.
         if let Some(selection) = &state.selection {
             Self::paint_selection(selection, &text_layout, &bounds, window, cx);
         }
+        self.styled_text
+            .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
 
         if is_selectable {
             if let Some(text_view_state) = GlobalState::global(cx).text_view_state().cloned() {
