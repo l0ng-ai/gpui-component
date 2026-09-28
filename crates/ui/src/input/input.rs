@@ -16,7 +16,7 @@ use crate::{IconName, Size};
 use crate::{Selectable, StyledExt, h_flex};
 use crate::{Sizable, StyleSized};
 
-use super::{InputState, element::EditorScrollbar};
+use super::{InputState, element::EditorScrollbar, multi_selection::each_selection};
 
 /// Returns `(background, foreground)` colors for input-like components.
 pub(crate) fn input_style(disabled: bool, cx: &App) -> (Hsla, Hsla) {
@@ -300,14 +300,28 @@ impl RenderOnce for Input {
             .track_focus(&state.focus_handle.clone())
             .tab_index(self.tab_index)
             .when(!state.disabled, |this| {
-                this.on_action(window.listener_for(&self.state, InputState::backspace))
-                    .on_action(window.listener_for(&self.state, InputState::delete))
-                    .on_action(
-                        window.listener_for(&self.state, InputState::delete_to_beginning_of_line),
-                    )
-                    .on_action(window.listener_for(&self.state, InputState::delete_to_end_of_line))
-                    .on_action(window.listener_for(&self.state, InputState::delete_previous_word))
-                    .on_action(window.listener_for(&self.state, InputState::delete_next_word))
+                this.on_action(each_selection(window, &self.state, InputState::backspace))
+                    .on_action(each_selection(window, &self.state, InputState::delete))
+                    .on_action(each_selection(
+                        window,
+                        &self.state,
+                        InputState::delete_to_beginning_of_line,
+                    ))
+                    .on_action(each_selection(
+                        window,
+                        &self.state,
+                        InputState::delete_to_end_of_line,
+                    ))
+                    .on_action(each_selection(
+                        window,
+                        &self.state,
+                        InputState::delete_previous_word,
+                    ))
+                    .on_action(each_selection(
+                        window,
+                        &self.state,
+                        InputState::delete_next_word,
+                    ))
                     .on_action(window.listener_for(&self.state, InputState::enter))
                     .on_action(window.listener_for(&self.state, InputState::escape))
                     .on_action(window.listener_for(&self.state, InputState::paste))
@@ -315,10 +329,26 @@ impl RenderOnce for Input {
                     .on_action(window.listener_for(&self.state, InputState::undo))
                     .on_action(window.listener_for(&self.state, InputState::redo))
                     .when(state.mode.is_multi_line(), |this| {
-                        this.on_action(window.listener_for(&self.state, InputState::indent_inline))
-                            .on_action(window.listener_for(&self.state, InputState::outdent_inline))
-                            .on_action(window.listener_for(&self.state, InputState::indent_block))
-                            .on_action(window.listener_for(&self.state, InputState::outdent_block))
+                        this.on_action(each_selection(
+                            window,
+                            &self.state,
+                            InputState::indent_inline,
+                        ))
+                        .on_action(each_selection(
+                            window,
+                            &self.state,
+                            InputState::outdent_inline,
+                        ))
+                        .on_action(each_selection(
+                            window,
+                            &self.state,
+                            InputState::indent_block,
+                        ))
+                        .on_action(each_selection(
+                            window,
+                            &self.state,
+                            InputState::outdent_block,
+                        ))
                     })
                     .on_action(
                         window.listener_for(&self.state, InputState::on_action_toggle_code_actions),
@@ -340,43 +370,99 @@ impl RenderOnce for Input {
                     })
             })
             .when(state.mode.is_code_editor(), |this| {
-                this.on_action(window.listener_for(&self.state, InputState::select_line_action))
-                    .on_action(
-                        window.listener_for(&self.state, InputState::move_to_matching_bracket),
-                    )
+                this.on_action(each_selection(
+                    window,
+                    &self.state,
+                    InputState::select_line_action,
+                ))
+                .on_action(each_selection(
+                    window,
+                    &self.state,
+                    InputState::move_to_matching_bracket,
+                ))
             })
-            .on_action(window.listener_for(&self.state, InputState::left))
-            .on_action(window.listener_for(&self.state, InputState::right))
-            .on_action(window.listener_for(&self.state, InputState::select_left))
-            .on_action(window.listener_for(&self.state, InputState::select_right))
+            .on_action(each_selection(window, &self.state, InputState::left))
+            .on_action(each_selection(window, &self.state, InputState::right))
+            .on_action(each_selection(window, &self.state, InputState::select_left))
+            .on_action(each_selection(
+                window,
+                &self.state,
+                InputState::select_right,
+            ))
             .when(state.mode.is_multi_line(), |this| {
                 let result = this
-                    .on_action(window.listener_for(&self.state, InputState::up))
-                    .on_action(window.listener_for(&self.state, InputState::down))
-                    .on_action(window.listener_for(&self.state, InputState::select_up))
-                    .on_action(window.listener_for(&self.state, InputState::select_down))
-                    .on_action(window.listener_for(&self.state, InputState::page_up))
-                    .on_action(window.listener_for(&self.state, InputState::page_down));
+                    .on_action(each_selection(window, &self.state, InputState::up))
+                    .on_action(each_selection(window, &self.state, InputState::down))
+                    .on_action(each_selection(window, &self.state, InputState::select_up))
+                    .on_action(each_selection(window, &self.state, InputState::select_down))
+                    .on_action(each_selection(window, &self.state, InputState::page_up))
+                    .on_action(each_selection(window, &self.state, InputState::page_down));
 
                 let result = result.on_action(
                     window.listener_for(&self.state, InputState::on_action_go_to_definition),
                 );
 
+                // Multiple cursors, code editor only.
+                let result = result.when(state.mode.is_code_editor(), |this| {
+                    this.on_action(
+                        window.listener_for(&self.state, InputState::select_next_occurrence),
+                    )
+                    .on_action(window.listener_for(&self.state, InputState::select_all_occurrences))
+                    .on_action(window.listener_for(&self.state, InputState::add_cursor_above))
+                    .on_action(window.listener_for(&self.state, InputState::add_cursor_below))
+                });
+
                 result
             })
             .on_action(window.listener_for(&self.state, InputState::select_all))
-            .on_action(window.listener_for(&self.state, InputState::select_to_start_of_line))
-            .on_action(window.listener_for(&self.state, InputState::select_to_end_of_line))
-            .on_action(window.listener_for(&self.state, InputState::select_to_previous_word))
-            .on_action(window.listener_for(&self.state, InputState::select_to_next_word))
-            .on_action(window.listener_for(&self.state, InputState::home))
-            .on_action(window.listener_for(&self.state, InputState::end))
-            .on_action(window.listener_for(&self.state, InputState::move_to_start))
-            .on_action(window.listener_for(&self.state, InputState::move_to_end))
-            .on_action(window.listener_for(&self.state, InputState::move_to_previous_word))
-            .on_action(window.listener_for(&self.state, InputState::move_to_next_word))
-            .on_action(window.listener_for(&self.state, InputState::select_to_start))
-            .on_action(window.listener_for(&self.state, InputState::select_to_end))
+            .on_action(each_selection(
+                window,
+                &self.state,
+                InputState::select_to_start_of_line,
+            ))
+            .on_action(each_selection(
+                window,
+                &self.state,
+                InputState::select_to_end_of_line,
+            ))
+            .on_action(each_selection(
+                window,
+                &self.state,
+                InputState::select_to_previous_word,
+            ))
+            .on_action(each_selection(
+                window,
+                &self.state,
+                InputState::select_to_next_word,
+            ))
+            .on_action(each_selection(window, &self.state, InputState::home))
+            .on_action(each_selection(window, &self.state, InputState::end))
+            .on_action(each_selection(
+                window,
+                &self.state,
+                InputState::move_to_start,
+            ))
+            .on_action(each_selection(window, &self.state, InputState::move_to_end))
+            .on_action(each_selection(
+                window,
+                &self.state,
+                InputState::move_to_previous_word,
+            ))
+            .on_action(each_selection(
+                window,
+                &self.state,
+                InputState::move_to_next_word,
+            ))
+            .on_action(each_selection(
+                window,
+                &self.state,
+                InputState::select_to_start,
+            ))
+            .on_action(each_selection(
+                window,
+                &self.state,
+                InputState::select_to_end,
+            ))
             .on_action(window.listener_for(&self.state, InputState::show_character_palette))
             .on_action(window.listener_for(&self.state, InputState::copy))
             .on_action(window.listener_for(&self.state, InputState::on_action_search))

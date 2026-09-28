@@ -106,6 +106,28 @@ impl EditPlan {
     }
 }
 
+/// A line command's edit over every selection at once: one contiguous
+/// replacement, and each selection (in the order they were passed) after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LinesPlan {
+    /// The replaced byte range, in the text before the edit.
+    pub range: Range<usize>,
+    pub new_text: String,
+    /// The selections, in the text after the edit.
+    pub selections: Vec<Range<usize>>,
+}
+
+impl LinesPlan {
+    #[cfg(test)]
+    fn apply(&self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len() + self.new_text.len());
+        out.push_str(&text[..self.range.start]);
+        out.push_str(&self.new_text);
+        out.push_str(&text[self.range.end..]);
+        out
+    }
+}
+
 /// What typing a character turned into.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Typed {
@@ -320,13 +342,8 @@ pub(crate) fn selected_rows(text: &Rope, selection: &Range<usize>) -> Range<usiz
     start..end + 1
 }
 
-/// Fold a list of sorted, non-overlapping edits into one [`EditPlan`],
-/// carrying `selection` through them.
-fn compose(
-    text: &Rope,
-    edits: &[(Range<usize>, String)],
-    selection: &Range<usize>,
-) -> Option<EditPlan> {
+/// Fold a list of sorted, non-overlapping edits into one replacement.
+fn compose_text(text: &Rope, edits: &[(Range<usize>, String)]) -> Option<(Range<usize>, String)> {
     let first = edits.first()?;
     let last = edits.last()?;
     let covering = first.0.start..last.0.end;
@@ -338,16 +355,76 @@ fn compose(
         new_text.push_str(insert);
         cursor = range.end;
     }
+    Some((covering, new_text))
+}
 
-    // A bare cursor at an insertion point moves past the insertion; a
-    // selection grows to take in text inserted at either of its ends.
+/// Carry a selection through `edits`. A bare cursor at an insertion point
+/// moves past the insertion; a selection grows to take in text inserted at
+/// either of its ends.
+fn map_selection(edits: &[(Range<usize>, String)], selection: &Range<usize>) -> Range<usize> {
     let start = map_offset(edits, selection.start, selection.is_empty());
     let end = map_offset(edits, selection.end, true);
+    start..end
+}
+
+/// [`compose_text`] into an [`EditPlan`], carrying `selection` along.
+fn compose(
+    text: &Rope,
+    edits: &[(Range<usize>, String)],
+    selection: &Range<usize>,
+) -> Option<EditPlan> {
+    let (range, new_text) = compose_text(text, edits)?;
     Some(EditPlan {
-        range: covering,
+        range,
         new_text,
-        selection: start..end,
+        selection: map_selection(edits, selection),
     })
+}
+
+/// [`compose_text`] into a [`LinesPlan`], carrying every selection along.
+fn compose_lines(
+    text: &Rope,
+    edits: &[(Range<usize>, String)],
+    selections: &[Range<usize>],
+) -> Option<LinesPlan> {
+    let (range, new_text) = compose_text(text, edits)?;
+    Some(LinesPlan {
+        range,
+        new_text,
+        selections: selections.iter().map(|s| map_selection(edits, s)).collect(),
+    })
+}
+
+/// Every row any selection touches, sorted, each once.
+fn union_rows(text: &Rope, selections: &[Range<usize>]) -> Vec<usize> {
+    let rows: std::collections::BTreeSet<usize> = selections
+        .iter()
+        .flat_map(|s| selected_rows(text, s))
+        .collect();
+    rows.into_iter().collect()
+}
+
+/// The selections' rows as contiguous blocks (overlapping or adjacent row
+/// ranges merge, so two cursors on neighbouring lines move together), and for
+/// each selection the index of its block.
+fn row_blocks(text: &Rope, selections: &[Range<usize>]) -> (Vec<Range<usize>>, Vec<usize>) {
+    let mut rows: Vec<(Range<usize>, usize)> = selections
+        .iter()
+        .enumerate()
+        .map(|(ix, s)| (selected_rows(text, s), ix))
+        .collect();
+    rows.sort_by_key(|(r, _)| (r.start, r.end));
+
+    let mut blocks: Vec<Range<usize>> = Vec::new();
+    let mut owner = vec![0; selections.len()];
+    for (range, ix) in rows {
+        match blocks.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => blocks.push(range),
+        }
+        owner[ix] = blocks.len() - 1;
+    }
+    (blocks, owner)
 }
 
 /// Where `offset` lands after `edits` are applied. An offset at an insertion
@@ -382,12 +459,14 @@ fn map_offset(edits: &[(Range<usize>, String)], offset: usize, stick_right: bool
 /// A selection of nothing but blank lines gets the token after its indent.
 pub(crate) fn toggle_line_comment(
     text: &Rope,
-    selection: &Range<usize>,
+    selections: &[Range<usize>],
     token: &str,
     tab: TabSize,
-) -> Option<EditPlan> {
-    let rows = selected_rows(text, selection);
-    let lines: Vec<(usize, String)> = rows.map(|row| (row, line_string(text, row))).collect();
+) -> Option<LinesPlan> {
+    let lines: Vec<(usize, String)> = union_rows(text, selections)
+        .into_iter()
+        .map(|row| (row, line_string(text, row)))
+        .collect();
     let non_blank: Vec<&(usize, String)> = lines.iter().filter(|(_, l)| !is_blank(l)).collect();
 
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
@@ -418,30 +497,43 @@ pub(crate) fn toggle_line_comment(
         }
     }
 
-    compose(text, &edits, selection)
+    compose_lines(text, &edits, selections)
 }
 
 /// Toggle a block comment around each selected line, for languages that have
 /// no line comment (CSS, HTML, Markdown).
 pub(crate) fn toggle_line_block_comment(
     text: &Rope,
-    selection: &Range<usize>,
+    selections: &[Range<usize>],
     open: &str,
     close: &str,
-) -> Option<EditPlan> {
-    let rows = selected_rows(text, selection);
-    let lines: Vec<(usize, String)> = rows
+) -> Option<LinesPlan> {
+    let lines: Vec<(usize, String)> = union_rows(text, selections)
+        .into_iter()
         .map(|row| (row, line_string(text, row)))
         .filter(|(_, l)| !is_blank(l))
         .collect();
     if lines.is_empty() {
-        let at = selection.start;
+        // Only blank lines: an empty comment at each cursor, cursor inside.
         let insert = format!("{open}  {close}");
-        let cursor = at + open.len() + 1;
-        return Some(EditPlan {
-            range: at..selection.end,
-            new_text: insert,
-            selection: cursor..cursor,
+        let edits: Vec<(Range<usize>, String)> = selections
+            .iter()
+            .map(|s| (s.clone(), insert.clone()))
+            .collect();
+        let (range, new_text) = compose_text(text, &edits)?;
+        let mut delta = 0isize;
+        let selections = selections
+            .iter()
+            .map(|s| {
+                let caret = (s.start as isize + delta) as usize + open.len() + 1;
+                delta += insert.len() as isize - s.len() as isize;
+                caret..caret
+            })
+            .collect();
+        return Some(LinesPlan {
+            range,
+            new_text,
+            selections,
         });
     }
 
@@ -470,7 +562,7 @@ pub(crate) fn toggle_line_block_comment(
         }
     }
 
-    compose(text, &edits, selection)
+    compose_lines(text, &edits, selections)
 }
 
 /// Wrap the selection in a block comment, or unwrap it if it already is one.
@@ -487,7 +579,13 @@ pub(crate) fn toggle_block_comment(
         let row = text.offset_to_point(selection.start).row;
         let line = line_string(text, row);
         if is_blank(&line) {
-            return toggle_line_block_comment(text, selection, open, close);
+            let plan =
+                toggle_line_block_comment(text, std::slice::from_ref(selection), open, close)?;
+            return Some(EditPlan {
+                range: plan.range,
+                new_text: plan.new_text,
+                selection: plan.selections[0].clone(),
+            });
         }
         let line_start = text.line_start_offset(row);
         let start = leading_whitespace(&line).len();
@@ -538,54 +636,74 @@ fn shift_range(range: &Range<usize>, delta: isize) -> Range<usize> {
     shift(range.start)..shift(range.end)
 }
 
-/// Swap the selected lines with the line above (`up`) or below.
-pub(crate) fn move_lines(text: &Rope, selection: &Range<usize>, up: bool) -> Option<EditPlan> {
-    let rows = selected_rows(text, selection);
-    let block = text.slice_lines(rows.clone()).to_string();
-    if up {
-        let prev = rows.start.checked_sub(1)?;
-        let prev_line = line_string(text, prev);
-        let range = text.line_start_offset(prev)..text.line_end_offset(rows.end - 1);
-        Some(EditPlan {
-            range,
-            new_text: format!("{block}\n{prev_line}"),
-            selection: shift_range(selection, -(prev_line.len() as isize + 1)),
-        })
-    } else {
-        let next = rows.end;
-        if next >= text.lines_len() {
-            return None;
+/// Swap each block of selected lines with the line above (`up`) or below.
+/// Nothing moves when any block is already at that end of the text.
+pub(crate) fn move_lines(text: &Rope, selections: &[Range<usize>], up: bool) -> Option<LinesPlan> {
+    let (blocks, owner) = row_blocks(text, selections);
+    let mut edits = Vec::with_capacity(blocks.len());
+    let mut deltas = Vec::with_capacity(blocks.len());
+    for rows in &blocks {
+        let block = text.slice_lines(rows.clone()).to_string();
+        if up {
+            let prev = rows.start.checked_sub(1)?;
+            let prev_line = line_string(text, prev);
+            let range = text.line_start_offset(prev)..text.line_end_offset(rows.end - 1);
+            edits.push((range, format!("{block}\n{prev_line}")));
+            deltas.push(-(prev_line.len() as isize + 1));
+        } else {
+            let next = rows.end;
+            if next >= text.lines_len() {
+                return None;
+            }
+            let next_line = line_string(text, next);
+            let range = text.line_start_offset(rows.start)..text.line_end_offset(next);
+            edits.push((range, format!("{next_line}\n{block}")));
+            deltas.push(next_line.len() as isize + 1);
         }
-        let next_line = line_string(text, next);
-        let range = text.line_start_offset(rows.start)..text.line_end_offset(next);
-        Some(EditPlan {
-            range,
-            new_text: format!("{next_line}\n{block}"),
-            selection: shift_range(selection, next_line.len() as isize + 1),
-        })
     }
+    let (range, new_text) = compose_text(text, &edits)?;
+    let selections = selections
+        .iter()
+        .zip(&owner)
+        .map(|(s, &block)| shift_range(s, deltas[block]))
+        .collect();
+    Some(LinesPlan {
+        range,
+        new_text,
+        selections,
+    })
 }
 
-/// Duplicate the selected lines. Copying down moves the selection onto the
-/// new lower copy; copying up leaves it on the new upper copy.
-pub(crate) fn copy_lines(text: &Rope, selection: &Range<usize>, up: bool) -> EditPlan {
-    let rows = selected_rows(text, selection);
-    let block = text.slice_lines(rows.clone()).to_string();
-    if up {
-        let at = text.line_start_offset(rows.start);
-        EditPlan {
-            range: at..at,
-            new_text: format!("{block}\n"),
-            selection: selection.clone(),
-        }
-    } else {
-        let at = text.line_end_offset(rows.end - 1);
-        EditPlan {
-            range: at..at,
-            new_text: format!("\n{block}"),
-            selection: shift_range(selection, block.len() as isize + 1),
+/// Duplicate each block of selected lines. Copying down moves the selections
+/// onto the new lower copy; copying up leaves them on the new upper copy.
+pub(crate) fn copy_lines(text: &Rope, selections: &[Range<usize>], up: bool) -> Option<LinesPlan> {
+    let (blocks, owner) = row_blocks(text, selections);
+    let mut edits = Vec::with_capacity(blocks.len());
+    for rows in &blocks {
+        let block = text.slice_lines(rows.clone()).to_string();
+        if up {
+            let at = text.line_start_offset(rows.start);
+            edits.push((at..at, format!("{block}\n")));
+        } else {
+            let at = text.line_end_offset(rows.end - 1);
+            edits.push((at..at, format!("\n{block}")));
         }
     }
+    let (range, new_text) = compose_text(text, &edits)?;
+    let selections = selections
+        .iter()
+        .zip(&owner)
+        .map(|(s, &block)| {
+            let before: usize = edits[..block].iter().map(|(_, t)| t.len()).sum();
+            let own = if up { 0 } else { edits[block].1.len() };
+            shift_range(s, (before + own) as isize)
+        })
+        .collect();
+    Some(LinesPlan {
+        range,
+        new_text,
+        selections,
+    })
 }
 
 /// The byte index of the `chars`-th character of `line`, clamped to its end.
@@ -597,43 +715,68 @@ fn byte_for_char_column(line: &str, chars: usize) -> usize {
         .unwrap_or(line.len())
 }
 
-/// Delete the selected lines, leaving the cursor on the line that takes their
-/// place at the same character column.
-pub(crate) fn delete_lines(text: &Rope, selection: &Range<usize>, cursor: usize) -> EditPlan {
-    let rows = selected_rows(text, selection);
+/// Delete every block of selected lines. Each cursor (`heads[i]` is the caret
+/// of `selections[i]`) lands on the line that takes its block's place, at the
+/// same character column.
+pub(crate) fn delete_lines(
+    text: &Rope,
+    selections: &[Range<usize>],
+    heads: &[usize],
+) -> Option<LinesPlan> {
+    let (blocks, owner) = row_blocks(text, selections);
     let total = text.lines_len();
-    let point = text.offset_to_point(cursor);
-    let column = text
-        .slice(text.line_start_offset(point.row)..cursor)
-        .chars()
-        .count();
+    let ranges: Vec<Range<usize>> = blocks
+        .iter()
+        .map(|rows| {
+            if rows.end < total {
+                text.line_start_offset(rows.start)..text.line_start_offset(rows.end)
+            } else if rows.start > 0 {
+                text.line_end_offset(rows.start - 1)..text.len()
+            } else {
+                0..text.len()
+            }
+        })
+        .collect();
+    let edits: Vec<(Range<usize>, String)> =
+        ranges.iter().map(|r| (r.clone(), String::new())).collect();
+    let (range, new_text) = compose_text(text, &edits)?;
 
-    if rows.end < total {
-        let range = text.line_start_offset(rows.start)..text.line_start_offset(rows.end);
-        let next = line_string(text, rows.end);
-        let at = range.start + byte_for_char_column(&next, column);
-        EditPlan {
-            range,
-            new_text: String::new(),
-            selection: at..at,
-        }
-    } else if rows.start > 0 {
-        let prev_row = rows.start - 1;
-        let range = text.line_end_offset(prev_row)..text.len();
-        let prev = line_string(text, prev_row);
-        let at = text.line_start_offset(prev_row) + byte_for_char_column(&prev, column);
-        EditPlan {
-            range,
-            new_text: String::new(),
-            selection: at..at,
-        }
-    } else {
-        EditPlan {
-            range: 0..text.len(),
-            new_text: String::new(),
-            selection: 0..0,
-        }
-    }
+    let selections = heads
+        .iter()
+        .zip(&owner)
+        .map(|(&head, &block)| {
+            let rows = &blocks[block];
+            let row = text.offset_to_point(head).row;
+            let column = text
+                .slice(text.line_start_offset(row)..head)
+                .chars()
+                .count();
+            let target_row = if rows.end < total {
+                Some(rows.end)
+            } else {
+                rows.start.checked_sub(1)
+            };
+            let caret = match target_row {
+                Some(row) => {
+                    text.line_start_offset(row)
+                        + byte_for_char_column(&line_string(text, row), column)
+                }
+                None => 0,
+            };
+            let deleted: usize = ranges
+                .iter()
+                .filter(|r| r.end <= caret && !r.is_empty())
+                .map(|r| r.len())
+                .sum();
+            let caret = caret.saturating_sub(deleted);
+            caret..caret
+        })
+        .collect();
+    Some(LinesPlan {
+        range,
+        new_text,
+        selections,
+    })
 }
 
 /// Open an empty line below (or above) the cursor's line with the same
@@ -1053,13 +1196,64 @@ impl InputState {
         prefix_in_string_or_comment(&prefix, config)
     }
 
-    /// Apply `plan` as one replacement, which is one undo step of its own.
+    /// Apply one cursor's `plan`. Callers bracket the whole command with
+    /// [`crate::history::History::break_group`] so it is one undo step.
     fn apply_edit_plan(&mut self, plan: EditPlan, window: &mut Window, cx: &mut Context<Self>) {
+        let range_utf16 = self.range_to_utf16(&plan.range);
+        self.replace_text_in_range_silent(Some(range_utf16), &plan.new_text, window, cx);
+        self.set_selection_after_edit(plan.selection, cx);
+    }
+
+    /// Run a per-cursor command at every cursor, as one undo step.
+    fn edit_each_cursor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        f: impl Fn(&Self) -> Option<EditPlan>,
+    ) {
+        self.history.break_group();
+        self.edit_each_selection(window, cx, |this, window, cx| {
+            if let Some(plan) = f(this) {
+                this.apply_edit_plan(plan, window, cx);
+            }
+        });
+        self.history.break_group();
+    }
+
+    /// Every selection in document order, and the index of the primary one.
+    fn all_selections(&self) -> (Vec<Range<usize>>, usize) {
+        let all = self.selected_ranges();
+        let primary: Range<usize> = self.selected_range.into();
+        let ix = all.iter().position(|r| *r == primary).unwrap_or(0);
+        (all, ix)
+    }
+
+    /// Apply a line command's plan over every selection as one undo step.
+    fn apply_lines_plan(
+        &mut self,
+        plan: LinesPlan,
+        primary: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let range_utf16 = self.range_to_utf16(&plan.range);
         self.history.break_group();
         self.replace_text_in_range_silent(Some(range_utf16), &plan.new_text, window, cx);
         self.history.break_group();
-        self.set_selection_after_edit(plan.selection, cx);
+
+        let mut selections = plan.selections;
+        if selections.len() <= 1 {
+            if let Some(selection) = selections.pop() {
+                self.set_selection_after_edit(selection, cx);
+            }
+            return;
+        }
+        // `set_selected_ranges` makes the last range the primary one.
+        let main = selections.remove(primary.min(selections.len() - 1));
+        selections.push(main);
+        self.set_selected_ranges(selections, cx);
+        self.scroll_to(self.cursor(), None, cx);
+        self.pause_blink_cursor(cx);
     }
 
     fn set_selection_after_edit(&mut self, selection: Range<usize>, cx: &mut Context<Self>) {
@@ -1077,6 +1271,21 @@ impl InputState {
         self.selected_range.into()
     }
 
+    /// The line comment toggle over every selection, or the per-line block
+    /// comment for languages without a line comment.
+    fn line_comment_plan(&self, selections: &[Range<usize>]) -> Option<LinesPlan> {
+        let config = self.editing_language();
+        match (config.line_comment, config.block_comment) {
+            (Some(token), _) => {
+                toggle_line_comment(&self.text, selections, token, self.mode.tab_size())
+            }
+            (None, Some((open, close))) => {
+                toggle_line_block_comment(&self.text, selections, open, close)
+            }
+            (None, None) => None,
+        }
+    }
+
     pub(super) fn toggle_line_comment(
         &mut self,
         _: &ToggleLineComment,
@@ -1087,19 +1296,9 @@ impl InputState {
             cx.propagate();
             return;
         }
-        let config = self.editing_language();
-        let selection = self.selection();
-        let plan = match (config.line_comment, config.block_comment) {
-            (Some(token), _) => {
-                toggle_line_comment(&self.text, &selection, token, self.mode.tab_size())
-            }
-            (None, Some((open, close))) => {
-                toggle_line_block_comment(&self.text, &selection, open, close)
-            }
-            (None, None) => None,
-        };
-        if let Some(plan) = plan {
-            self.apply_edit_plan(plan, window, cx);
+        let (selections, primary) = self.all_selections();
+        if let Some(plan) = self.line_comment_plan(&selections) {
+            self.apply_lines_plan(plan, primary, window, cx);
         }
     }
 
@@ -1113,18 +1312,17 @@ impl InputState {
             cx.propagate();
             return;
         }
-        let config = self.editing_language();
-        let selection = self.selection();
-        let plan = match (config.block_comment, config.line_comment) {
-            (Some((open, close)), _) => toggle_block_comment(&self.text, &selection, open, close),
-            (None, Some(token)) => {
-                toggle_line_comment(&self.text, &selection, token, self.mode.tab_size())
+        let Some((open, close)) = self.editing_language().block_comment else {
+            // No block comment in this language: fall back to line comments.
+            let (selections, primary) = self.all_selections();
+            if let Some(plan) = self.line_comment_plan(&selections) {
+                self.apply_lines_plan(plan, primary, window, cx);
             }
-            (None, None) => None,
+            return;
         };
-        if let Some(plan) = plan {
-            self.apply_edit_plan(plan, window, cx);
-        }
+        self.edit_each_cursor(window, cx, |this| {
+            toggle_block_comment(&this.text, &this.selection(), open, close)
+        });
     }
 
     fn move_lines_by(&mut self, up: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -1132,8 +1330,9 @@ impl InputState {
             cx.propagate();
             return;
         }
-        if let Some(plan) = move_lines(&self.text, &self.selection(), up) {
-            self.apply_edit_plan(plan, window, cx);
+        let (selections, primary) = self.all_selections();
+        if let Some(plan) = move_lines(&self.text, &selections, up) {
+            self.apply_lines_plan(plan, primary, window, cx);
         }
     }
 
@@ -1160,8 +1359,10 @@ impl InputState {
             cx.propagate();
             return;
         }
-        let plan = copy_lines(&self.text, &self.selection(), up);
-        self.apply_edit_plan(plan, window, cx);
+        let (selections, primary) = self.all_selections();
+        if let Some(plan) = copy_lines(&self.text, &selections, up) {
+            self.apply_lines_plan(plan, primary, window, cx);
+        }
     }
 
     pub(super) fn copy_line_up(
@@ -1192,11 +1393,21 @@ impl InputState {
             cx.propagate();
             return;
         }
-        let plan = delete_lines(&self.text, &self.selection(), self.cursor());
+        let (selections, primary) = self.all_selections();
+        // The primary caret keeps its own column; for the others, the end of
+        // their range stands in for the caret.
+        let heads: Vec<usize> = selections
+            .iter()
+            .enumerate()
+            .map(|(ix, s)| if ix == primary { self.cursor() } else { s.end })
+            .collect();
+        let Some(plan) = delete_lines(&self.text, &selections, &heads) else {
+            return;
+        };
         if plan.range.is_empty() {
             return;
         }
-        self.apply_edit_plan(plan, window, cx);
+        self.apply_lines_plan(plan, primary, window, cx);
     }
 
     fn insert_line_at(&mut self, above: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -1204,8 +1415,9 @@ impl InputState {
             cx.propagate();
             return;
         }
-        let plan = insert_line(&self.text, self.cursor(), above);
-        self.apply_edit_plan(plan, window, cx);
+        self.edit_each_cursor(window, cx, |this| {
+            Some(insert_line(&this.text, this.cursor(), above))
+        });
     }
 
     pub(super) fn insert_line_below(
@@ -1428,8 +1640,20 @@ mod tests {
         Some(mark(&after, &plan.selection))
     }
 
+    fn run_lines(
+        marked: &str,
+        f: impl Fn(&Rope, &[Range<usize>]) -> Option<LinesPlan>,
+    ) -> Option<String> {
+        let (text, selection) = parse(marked);
+        let rope = Rope::from(text.as_str());
+        let plan = f(&rope, std::slice::from_ref(&selection))?;
+        assert_eq!(plan.selections.len(), 1);
+        let after = plan.apply(&text);
+        Some(mark(&after, &plan.selections[0]))
+    }
+
     fn comment(marked: &str) -> String {
-        run(marked, |t, s| toggle_line_comment(t, s, "//", TAB4)).unwrap()
+        run_lines(marked, |t, s| toggle_line_comment(t, s, "//", TAB4)).unwrap()
     }
 
     #[test]
@@ -1518,11 +1742,11 @@ mod tests {
         // Tab = 4 columns, so both lines sit at column 4.
         assert_eq!(comment("|\ta\n    b|"), "|\t// a\n    // b|");
         // With 2-column tabs the tab line is shallower.
-        let out = run("|\ta\n    b|", |t, s| toggle_line_comment(t, s, "//", TAB2)).unwrap();
+        let out = run_lines("|\ta\n    b|", |t, s| toggle_line_comment(t, s, "//", TAB2)).unwrap();
         assert_eq!(out, "|\t// a\n  //   b|");
         // A tab that straddles the minimum column: insert before it.
         assert_eq!(comment("|  \ta\n  b|"), "|  // \ta\n  // b|");
-        let hard = run("|\t\ta\n\tb|", |t, s| toggle_line_comment(t, s, "#", HARD4)).unwrap();
+        let hard = run_lines("|\t\ta\n\tb|", |t, s| toggle_line_comment(t, s, "#", HARD4)).unwrap();
         assert_eq!(hard, "|\t# \ta\n\t# b|");
     }
 
@@ -1539,20 +1763,22 @@ mod tests {
 
     #[test]
     fn test_comment_hash_token() {
-        let out = run("  |x = 1", |t, s| toggle_line_comment(t, s, "#", TAB4)).unwrap();
+        let out = run_lines("  |x = 1", |t, s| toggle_line_comment(t, s, "#", TAB4)).unwrap();
         assert_eq!(out, "  # |x = 1");
-        let out = run("  # |x = 1", |t, s| toggle_line_comment(t, s, "#", TAB4)).unwrap();
+        let out = run_lines("  # |x = 1", |t, s| toggle_line_comment(t, s, "#", TAB4)).unwrap();
         assert_eq!(out, "  |x = 1");
     }
 
     #[test]
     fn test_line_block_comment() {
-        let html = |m: &str| run(m, |t, s| toggle_line_block_comment(t, s, "<!--", "-->")).unwrap();
+        let html =
+            |m: &str| run_lines(m, |t, s| toggle_line_block_comment(t, s, "<!--", "-->")).unwrap();
         assert_eq!(html("  <p>|hi</p>"), "  <!-- <p>|hi</p> -->");
         assert_eq!(html("  <!-- <p>|hi</p> -->"), "  <p>|hi</p>");
         assert_eq!(html("|a\n  b|"), "|<!-- a -->\n  <!-- b -->|");
         assert_eq!(html("|<!-- a -->\n  <!-- b -->|"), "|a\n  b|");
-        let css = |m: &str| run(m, |t, s| toggle_line_block_comment(t, s, "/*", "*/")).unwrap();
+        let css =
+            |m: &str| run_lines(m, |t, s| toggle_line_block_comment(t, s, "/*", "*/")).unwrap();
         assert_eq!(css("a { color: red; }|  "), "/* a { color: red; } */|  ");
         assert_eq!(css("/*x*/|"), "x|");
         // Blank line: an empty comment with the cursor inside.
@@ -1570,11 +1796,11 @@ mod tests {
     }
 
     fn move_up(m: &str) -> Option<String> {
-        run(m, |t, s| move_lines(t, s, true))
+        run_lines(m, |t, s| move_lines(t, s, true))
     }
 
     fn move_down(m: &str) -> Option<String> {
-        run(m, |t, s| move_lines(t, s, false))
+        run_lines(m, |t, s| move_lines(t, s, false))
     }
 
     #[test]
@@ -1605,8 +1831,8 @@ mod tests {
 
     #[test]
     fn test_copy_lines() {
-        let down = |m: &str| run(m, |t, s| Some(copy_lines(t, s, false))).unwrap();
-        let up = |m: &str| run(m, |t, s| Some(copy_lines(t, s, true))).unwrap();
+        let down = |m: &str| run_lines(m, |t, s| copy_lines(t, s, false)).unwrap();
+        let up = |m: &str| run_lines(m, |t, s| copy_lines(t, s, true)).unwrap();
         assert_eq!(down("a|b\nc"), "ab\na|b\nc");
         assert_eq!(up("a|b\nc"), "a|b\nab\nc");
         assert_eq!(down("x\n|a\nb|"), "x\na\nb\n|a\nb|");
@@ -1616,13 +1842,7 @@ mod tests {
 
     #[test]
     fn test_delete_lines() {
-        let delete = |m: &str| {
-            run(m, |t, s| {
-                let cursor = s.end;
-                Some(delete_lines(t, s, cursor))
-            })
-            .unwrap()
-        };
+        let delete = |m: &str| run_lines(m, |t, s| delete_lines(t, s, &[s[0].end])).unwrap();
         assert_eq!(delete("aaa\nb|b\ncccc"), "aaa\nc|ccc");
         // Column clamps to a shorter next line.
         assert_eq!(delete("aaa\nbbbb|b\nc"), "aaa\nc|");
@@ -1870,6 +2090,93 @@ mod tests {
         assert!(!tree_cursor_in_string_or_comment(&tree, 0));
     }
 
+    /// Run a line command over several selections given as byte ranges.
+    fn multi(
+        text: &str,
+        selections: &[Range<usize>],
+        f: impl Fn(&Rope, &[Range<usize>]) -> Option<LinesPlan>,
+    ) -> Option<(String, Vec<Range<usize>>)> {
+        let plan = f(&Rope::from(text), selections)?;
+        Some((plan.apply(text), plan.selections))
+    }
+
+    #[test]
+    fn test_multi_cursor_comment_dedupes_lines() {
+        // Two cursors on line 0, one on line 2: each line commented once.
+        let (out, sels) = multi("ab\ncd\nef", &[0..0, 1..1, 7..7], |t, s| {
+            toggle_line_comment(t, s, "//", TAB4)
+        })
+        .unwrap();
+        assert_eq!(out, "// ab\ncd\n// ef");
+        assert_eq!(sels, vec![3..3, 4..4, 13..13]);
+        // And back: all touched lines are commented, so they all uncomment.
+        let (out, _) = multi("// ab\ncd\n// ef", &[3..3, 13..13], |t, s| {
+            toggle_line_comment(t, s, "//", TAB4)
+        })
+        .unwrap();
+        assert_eq!(out, "ab\ncd\nef");
+        // One uncommented line among them: comment everything.
+        let (out, _) = multi("// ab\ncd\nef", &[0..0, 9..9], |t, s| {
+            toggle_line_comment(t, s, "//", TAB4)
+        })
+        .unwrap();
+        assert_eq!(out, "// // ab\ncd\n// ef");
+    }
+
+    #[test]
+    fn test_multi_cursor_move_lines() {
+        // Cursors on neighbouring lines move as one block.
+        let (out, sels) =
+            multi("a\nb\nc\nd", &[2..2, 4..4], |t, s| move_lines(t, s, true)).unwrap();
+        assert_eq!(out, "b\nc\na\nd");
+        assert_eq!(sels, vec![0..0, 2..2]);
+        // Two cursors on one line move it once.
+        let (out, sels) = multi("a\nbb\nc", &[2..2, 3..3], |t, s| move_lines(t, s, false)).unwrap();
+        assert_eq!(out, "a\nc\nbb");
+        assert_eq!(sels, vec![4..4, 5..5]);
+        // Separate blocks each swap with their neighbour.
+        let (out, _) = multi("a\nb\nc\nd\ne", &[2..2, 6..6], |t, s| {
+            move_lines(t, s, true)
+        })
+        .unwrap();
+        assert_eq!(out, "b\na\nd\nc\ne");
+        // A block already at the top stops the whole move.
+        assert_eq!(
+            multi("a\nb\nc", &[0..0, 4..4], |t, s| move_lines(t, s, true)),
+            None
+        );
+    }
+
+    #[test]
+    fn test_multi_cursor_copy_and_delete_lines() {
+        let (out, sels) = multi("a\nb\nc", &[0..0, 4..4], |t, s| copy_lines(t, s, false)).unwrap();
+        assert_eq!(out, "a\na\nb\nc\nc");
+        assert_eq!(sels, vec![2..2, 8..8]);
+        let (out, sels) = multi("a\nb\nc", &[0..0, 4..4], |t, s| copy_lines(t, s, true)).unwrap();
+        assert_eq!(out, "a\na\nb\nc\nc");
+        assert_eq!(sels, vec![0..0, 6..6]);
+
+        let (out, sels) = multi("aa\nbb\ncc\ndd", &[1..1, 7..7], |t, s| {
+            delete_lines(t, s, &[1, 7])
+        })
+        .unwrap();
+        assert_eq!(out, "bb\ndd");
+        assert_eq!(sels, vec![1..1, 4..4]);
+        // Two cursors on one line delete it once.
+        let (out, _) = multi("aa\nbb\ncc", &[3..3, 4..4], |t, s| {
+            delete_lines(t, s, &[3, 4])
+        })
+        .unwrap();
+        assert_eq!(out, "aa\ncc");
+        // The last line goes with its preceding newline.
+        let (out, sels) = multi("aa\nbb\ncc", &[0..0, 7..7], |t, s| {
+            delete_lines(t, s, &[0, 7])
+        })
+        .unwrap();
+        assert_eq!(out, "bb");
+        assert_eq!(sels, vec![0..0, 1..1]);
+    }
+
     #[test]
     fn test_map_offset() {
         let edits = vec![(2..2, "xx".to_string()), (5..7, String::new())];
@@ -2057,6 +2364,40 @@ mod gpui_tests {
         assert_eq!(value(&input, &mut cx), "a(");
         cx.simulate_keystrokes("alt-up");
         assert_eq!(value(&input, &mut cx), "a(");
+    }
+
+    #[gpui::test]
+    fn test_multi_cursor_commands(cx: &mut TestAppContext) {
+        let (input, mut cx) = setup(cx, |s| s.code_editor("rust"));
+        set_text(&input, &mut cx, "a\nb\nc", 0);
+        let set = |cx: &mut VisualTestContext, ranges: Vec<std::ops::Range<usize>>| {
+            cx.update(|_, cx| {
+                input.update(cx, |state, cx| state.set_selected_ranges(ranges, cx));
+            });
+        };
+        let ranges =
+            |cx: &mut VisualTestContext| cx.update(|_, cx| input.read(cx).selected_ranges());
+
+        set(&mut cx, vec![0..0, 4..4]);
+        cx.simulate_keystrokes(&secondary("/"));
+        assert_eq!(value(&input, &mut cx), "// a\nb\n// c");
+        assert_eq!(ranges(&mut cx), vec![3..3, 10..10]);
+        undo(&input, &mut cx);
+        assert_eq!(value(&input, &mut cx), "a\nb\nc");
+
+        set(&mut cx, vec![0..0, 2..2]);
+        cx.simulate_keystrokes("alt-down");
+        assert_eq!(value(&input, &mut cx), "c\na\nb");
+        assert_eq!(ranges(&mut cx), vec![2..2, 4..4]);
+
+        // Typing an opener pairs at every cursor.
+        set_text(&input, &mut cx, "f\ng", 0);
+        set(&mut cx, vec![1..1, 3..3]);
+        cx.simulate_input("(");
+        assert_eq!(value(&input, &mut cx), "f()\ng()");
+        assert_eq!(ranges(&mut cx), vec![2..2, 6..6]);
+        cx.simulate_keystrokes("backspace");
+        assert_eq!(value(&input, &mut cx), "f\ng");
     }
 
     #[test]
