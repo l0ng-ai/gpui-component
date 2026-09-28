@@ -578,7 +578,7 @@ pub(crate) fn toggle_line_comment(
         }
     } else if non_blank
         .iter()
-        .all(|(_, l)| l.trim_start().starts_with(token))
+        .all(|(_, l)| l[leading_whitespace(l).len()..].starts_with(token))
     {
         for (row, line) in non_blank {
             let at = text.line_start_offset(*row) + leading_whitespace(line).len();
@@ -639,7 +639,9 @@ pub(crate) fn toggle_line_block_comment(
     }
 
     let commented = lines.iter().all(|(_, l)| {
-        let t = l.trim();
+        // The same indent the edits below measure: `trim` would also strip
+        // non-ASCII spaces (U+3000), and the offsets would then disagree.
+        let t = without_cr(l)[leading_whitespace(l).len()..].trim_end();
         t.starts_with(open) && t.ends_with(close) && t.len() >= open.len() + close.len()
     });
 
@@ -2126,6 +2128,17 @@ mod tests {
         assert_eq!(out, "  # |x = 1");
         let out = run_lines("  # |x = 1", |t, s| toggle_line_comment(t, s, "#", TAB4)).unwrap();
         assert_eq!(out, "  |x = 1");
+    }
+
+    #[test]
+    fn test_comment_with_non_ascii_indent_does_not_panic() {
+        // U+3000 is whitespace to `trim`, but not an indent the edits
+        // measure: deciding "already commented" by `trim` sliced mid-char.
+        let line = |m: &str| run_lines(m, |t, s| toggle_line_comment(t, s, "//", TAB4)).unwrap();
+        assert_eq!(line("\u{3000}// |x"), "// \u{3000}// |x");
+        let css =
+            |m: &str| run_lines(m, |t, s| toggle_line_block_comment(t, s, "/*", "*/")).unwrap();
+        assert_eq!(css("\u{3000}/* x */|"), "/* \u{3000}/* x */ */|");
     }
 
     #[test]
