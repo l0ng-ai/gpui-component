@@ -814,6 +814,75 @@ impl TextElement {
         Self::layout_match_range(range, &last_layout, bounds)
     }
 
+    /// Layout the selection highlights and carets of the extra cursors
+    /// (multi-cursor), in the scrolled `bounds` the text paints in.
+    fn layout_extra_selections(
+        &self,
+        last_layout: &LastLayout,
+        bounds: &Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (Vec<Path<Pixels>>, Vec<Bounds<Pixels>>) {
+        let state = self.state.read(cx);
+        if state.extra_selections.is_empty() || !state.focus_handle.is_focused(window) {
+            return (vec![], vec![]);
+        }
+
+        let line_height = last_layout.line_height;
+        let cursor_height = match state.size {
+            crate::Size::Large => 1.,
+            crate::Size::Small => 0.75,
+            _ => 0.85,
+        } * line_height;
+        let visible = &last_layout.visible_range_offset;
+
+        // Top of each visible line, for the carets.
+        let mut line_tops = Vec::with_capacity(last_layout.lines.len());
+        let mut offset_y = last_layout.visible_top;
+        for line in last_layout.lines.iter() {
+            line_tops.push(offset_y);
+            offset_y += line.size(line_height).height;
+        }
+
+        let mut paths = vec![];
+        let mut carets = vec![];
+        for selection in state.extra_selections.iter() {
+            let range = selection.range;
+            if !range.is_empty() {
+                let range = range.start.max(visible.start)..range.end.min(visible.end);
+                if let Some(path) = Self::layout_match_range(range, last_layout, bounds) {
+                    paths.push(path);
+                }
+            }
+
+            let head = selection.head();
+            let vi = last_layout
+                .visible_line_byte_offsets
+                .partition_point(|start| *start <= head);
+            let Some(vi) = vi.checked_sub(1) else {
+                continue;
+            };
+            let line = &last_layout.lines[vi];
+            let line_start = last_layout.visible_line_byte_offsets[vi];
+            if head > line_start + line.len() {
+                continue;
+            }
+            let Some(pos) = line.position_for_index(head - line_start, last_layout, false) else {
+                continue;
+            };
+            carets.push(Bounds::new(
+                bounds.origin
+                    + point(
+                        last_layout.line_number_width + pos.x,
+                        line_tops[vi] + pos.y + (line_height - cursor_height) / 2.,
+                    ),
+                size(CURSOR_WIDTH, cursor_height),
+            ));
+        }
+
+        (paths, carets)
+    }
+
     /// Calculate the visible range of lines in the viewport.
     ///
     /// Returns
@@ -1436,6 +1505,10 @@ pub(super) struct PrepaintState {
     /// row index (zero based), no wrap, same line as the cursor.
     current_row: Option<usize>,
     selection_path: Option<Path<Pixels>>,
+    /// Selection highlights of the extra cursors (multi-cursor).
+    extra_selection_paths: Vec<Path<Pixels>>,
+    /// Carets of the extra cursors, already scrolled.
+    extra_cursor_bounds: Vec<Bounds<Pixels>>,
     hover_highlight_path: Option<Path<Pixels>>,
     search_match_paths: Vec<(Path<Pixels>, bool)>,
     document_color_paths: Vec<(Path<Pixels>, Hsla)>,
@@ -1847,6 +1920,8 @@ impl Element for TextElement {
 
         let search_match_paths = self.layout_search_matches(&last_layout, &mut bounds, cx);
         let selection_path = self.layout_selections(&last_layout, &mut bounds, window, cx);
+        let (extra_selection_paths, extra_cursor_bounds) =
+            self.layout_extra_selections(&last_layout, &bounds, window, cx);
         let hover_highlight_path = self.layout_hover_highlight(&last_layout, &mut bounds, cx);
         let document_color_paths =
             self.layout_document_colors(&document_colors, &last_layout, &bounds, cx);
@@ -1926,6 +2001,8 @@ impl Element for TextElement {
             cursor_scroll_offset,
             current_row,
             selection_path,
+            extra_selection_paths,
+            extra_cursor_bounds,
             search_match_paths,
             hover_highlight_path,
             hover_definition_hitbox,
@@ -2072,6 +2149,9 @@ impl Element for TextElement {
                 if let Some(path) = prepaint.selection_path.take() {
                     window.paint_path(path, cx.theme().selection);
                 }
+                for path in prepaint.extra_selection_paths.drain(..) {
+                    window.paint_path(path, cx.theme().selection);
+                }
 
                 // Paint hover highlight
                 if let Some(path) = prepaint.hover_highlight_path.take() {
@@ -2167,6 +2247,9 @@ impl Element for TextElement {
             if focused && show_cursor {
                 if let Some(cursor_bounds) = prepaint.cursor_bounds_with_scroll() {
                     window.paint_quad(fill(cursor_bounds, cx.theme().caret));
+                }
+                for cursor_bounds in prepaint.extra_cursor_bounds.iter() {
+                    window.paint_quad(fill(*cursor_bounds, cx.theme().caret));
                 }
             }
 
