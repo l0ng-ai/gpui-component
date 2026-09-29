@@ -233,7 +233,9 @@ impl InputState {
 
         self.on_action_search(&Search, window, cx);
         if let Some(panel) = self.search_panel.clone() {
-            panel.update(cx, |this, cx| this.set_replace_mode(true, window, cx));
+            // `true`: this editor was just checked, and reading it back from
+            // inside the panel would re-enter the update this runs in.
+            panel.update(cx, |this, cx| this.set_replace_mode(true, true, window, cx));
         }
     }
 }
@@ -337,8 +339,17 @@ impl SearchPanel {
 
     /// Show or hide the replace row. Opening it moves the focus to the
     /// replacement when there is already a query to replace.
-    fn set_replace_mode(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.replace_mode = on && self.replaceable(cx);
+    ///
+    /// `allowed` is the editor's `replaceable`, passed in rather than read:
+    /// the shortcut calls this from inside the editor's own update.
+    fn set_replace_mode(
+        &mut self,
+        on: bool,
+        allowed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.replace_mode = on && allowed;
         let input = if self.replace_mode && !self.search_input.read(cx).value().is_empty() {
             &self.replace_input
         } else {
@@ -354,7 +365,13 @@ impl SearchPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_replace_mode(!self.replace_mode, window, cx);
+        let allowed = self.replaceable(cx);
+        self.set_replace_mode(!self.replace_mode, allowed, window, cx);
+    }
+
+    #[cfg(test)]
+    pub(super) fn replace_mode(&self) -> bool {
+        self.replace_mode
     }
 
     fn replaceable(&self, cx: &App) -> bool {
@@ -603,7 +620,8 @@ impl Render for SearchPanel {
                                 .selected(self.replace_mode)
                                 .tooltip(t!("Input.Replace"))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.set_replace_mode(!this.replace_mode, window, cx);
+                                    let allowed = this.replaceable(cx);
+                                    this.set_replace_mode(!this.replace_mode, allowed, window, cx);
                                 })),
                         )
                     })

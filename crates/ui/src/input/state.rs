@@ -3346,6 +3346,32 @@ mod tests {
         }
     }
 
+    /// The shortcut runs inside the editor's own update, so opening the
+    /// replace row must not read the editor back.
+    #[gpui::test]
+    fn test_search_and_replace_opens_the_replace_row(cx: &mut TestAppContext) {
+        let input_view = InputView::build(cx, |state| state.code_editor("text").searchable(true));
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value("one two one", window, cx);
+                state.on_action_search_and_replace(&SearchAndReplace, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            let panel = input
+                .read(cx)
+                .search_panel
+                .clone()
+                .expect("search panel opened");
+            assert!(panel.read(cx).replace_mode());
+        });
+    }
+
     #[gpui::test]
     fn test_highlighting_preserved_after_fold(cx: &mut TestAppContext) {
         use crate::highlighter::HighlightTheme;
