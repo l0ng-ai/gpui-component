@@ -116,6 +116,7 @@ actions!(
         Escape,
         ToggleCodeActions,
         Search,
+        SearchAndReplace,
         GoToDefinition,
     ]
 );
@@ -273,6 +274,12 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("cmd-f", Search, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-f", Search, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-alt-f", SearchAndReplace, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-r", SearchAndReplace, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-h", SearchAndReplace, Some(CONTEXT)),
     ]);
 
     super::editing::init(cx);

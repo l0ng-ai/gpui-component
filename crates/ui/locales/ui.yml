@@ -242,6 +242,31 @@ List:
     zh-TW: 搜尋...
     it: Ricerca...
 Input:
+  Find in file:
+    en: Find in file
+    zh-CN: 在文件中查找
+    zh-HK: 在檔案中尋找
+    zh-TW: 在檔案中尋找
+  Replace with:
+    en: Replace with
+    zh-CN: 替换为
+    zh-HK: 取代為
+    zh-TW: 取代為
+  Match Case:
+    en: Match case
+    zh-CN: 区分大小写
+    zh-HK: 區分大小寫
+    zh-TW: 區分大小寫
+  No results:
+    en: No results
+    zh-CN: 无结果
+    zh-HK: 沒有結果
+    zh-TW: 沒有結果
+  Match count:
+    en: "%{current} of %{total}"
+    zh-CN: "%{current} / %{total}"
+    zh-HK: "%{current} / %{total}"
+    zh-TW: "%{current} / %{total}"
   Replace:
     en: Replace
     zh-CN: 替换

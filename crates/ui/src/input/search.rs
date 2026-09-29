@@ -3,21 +3,20 @@ use rust_i18n::t;
 use std::{ops::Range, rc::Rc};
 
 use gpui::{
-    App, AppContext as _, Context, Empty, Entity, FocusHandle, Focusable, Half,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, Styled, Subscription,
-    Window, actions, div, prelude::FluentBuilder as _,
+    App, AppContext as _, Context, Empty, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, Styled, Subscription, Window, actions, div,
+    prelude::FluentBuilder as _, px,
 };
 use ropey::Rope;
 
 use crate::{
-    ActiveTheme, Disableable, ElementExt, IconName, Selectable, Sizable,
+    ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable,
     button::{Button, ButtonVariants},
     h_flex,
     input::{
         Enter, Escape, IndentInline, Input, InputEvent, InputState, RopeExt as _, Search,
-        movement::MoveDirection,
+        SearchAndReplace, movement::MoveDirection,
     },
-    label::Label,
     v_flex,
 };
 
@@ -121,6 +120,7 @@ impl SearchMatcher {
         self.current_match_ix < self.matched_ranges.len().saturating_sub(1)
     }
 
+    #[cfg(test)]
     fn label(&self) -> String {
         if self.len() == 0 {
             return "0/0".to_string();
@@ -173,7 +173,6 @@ pub(super) struct SearchPanel {
     case_insensitive: bool,
     replace_mode: bool,
     matcher: SearchMatcher,
-    input_width: Pixels,
 
     open: bool,
     _subscriptions: Vec<Subscription>,
@@ -218,6 +217,25 @@ impl InputState {
         self.search_panel = Some(search_panel);
         cx.notify();
     }
+
+    pub(super) fn on_action_search_and_replace(
+        &mut self,
+        _: &SearchAndReplace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The panel's own fields are inputs too; let the action reach the
+        // panel around them, which toggles the replace row.
+        if !self.searchable || !self.replaceable {
+            cx.propagate();
+            return;
+        }
+
+        self.on_action_search(&Search, window, cx);
+        if let Some(panel) = self.search_panel.clone() {
+            panel.update(cx, |this, cx| this.set_replace_mode(true, window, cx));
+        }
+    }
 }
 
 impl SearchPanel {
@@ -244,8 +262,10 @@ impl SearchPanel {
     }
 
     pub fn new(editor: Entity<InputState>, window: &mut Window, cx: &mut App) -> Entity<Self> {
-        let search_input = cx.new(|cx| InputState::new(window, cx));
-        let replace_input = cx.new(|cx| InputState::new(window, cx));
+        let search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("Input.Find in file")));
+        let replace_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("Input.Replace with")));
 
         cx.new(|cx| {
             let _subscriptions =
@@ -269,7 +289,6 @@ impl SearchPanel {
                 replace_mode: false,
                 matcher: SearchMatcher::new(),
                 open: true,
-                input_width: Pixels::ZERO,
                 _subscriptions,
             }
         })
@@ -314,6 +333,28 @@ impl SearchPanel {
                 .update_cursor_by_offset(visible_range_offset.start);
         }
         cx.notify();
+    }
+
+    /// Show or hide the replace row. Opening it moves the focus to the
+    /// replacement when there is already a query to replace.
+    fn set_replace_mode(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_mode = on && self.replaceable(cx);
+        let input = if self.replace_mode && !self.search_input.read(cx).value().is_empty() {
+            &self.replace_input
+        } else {
+            &self.search_input
+        };
+        input.read(cx).focus_handle.clone().focus(window, cx);
+        cx.notify();
+    }
+
+    fn on_action_search_and_replace(
+        &mut self,
+        _: &SearchAndReplace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_replace_mode(!self.replace_mode, window, cx);
     }
 
     fn replaceable(&self, cx: &App) -> bool {
@@ -467,6 +508,58 @@ impl Render for SearchPanel {
             self.replace_mode = false;
         }
 
+        let theme = cx.theme();
+        let (fg, muted) = (theme.foreground, theme.muted_foreground);
+        let query_empty = self.search_input.read(cx).value().is_empty();
+        let (count, count_color) = if has_matches {
+            let count = t!(
+                "Input.Match count",
+                current = self.matcher.current_match_ix + 1,
+                total = self.matcher.len()
+            );
+            (count.to_string(), muted)
+        } else if query_empty {
+            (String::new(), muted)
+        } else {
+            (t!("Input.No results").to_string(), theme.danger)
+        };
+
+        // A field is one soft-filled pill with its controls inside: no border
+        // and no rule under it, so the bar reads as part of the text plane.
+        let pill = || {
+            h_flex()
+                .w_full()
+                .h(px(30.))
+                .gap(px(2.))
+                .pl(px(9.))
+                .pr(px(4.))
+                .rounded(px(7.))
+                .bg(fg.opacity(0.05))
+        };
+        let field = |input: &Entity<InputState>| {
+            Input::new(input)
+                .appearance(false)
+                .small()
+                .flex_1()
+                .min_w_0()
+                .pl(px(5.))
+                .pr_0()
+        };
+        let tool = |id: &'static str, icon: IconName| {
+            Button::new(id)
+                .xsmall()
+                .ghost()
+                .icon(Icon::new(icon).size(px(12.)).text_color(muted))
+        };
+        let divider = || {
+            div()
+                .flex_none()
+                .w(px(1.))
+                .h(px(14.))
+                .mx(px(6.))
+                .bg(fg.opacity(0.12))
+        };
+
         v_flex()
             .id("search-panel")
             .occlude()
@@ -475,132 +568,90 @@ impl Render for SearchPanel {
             .on_action(cx.listener(Self::on_action_enter))
             .on_action(cx.listener(Self::on_action_escape))
             .on_action(cx.listener(Self::on_action_tab))
+            .on_action(cx.listener(Self::on_action_search_and_replace))
             .font_family(cx.theme().font_family.clone())
-            .items_center()
-            .py_2()
-            .px_3()
             .w_full()
             .gap_1()
-            .bg(cx.theme().tokens.popover)
-            .border_b_1()
-            .rounded(cx.theme().radius.half())
-            .border_color(cx.theme().border)
+            // The editor's own padding already insets the panel from the top
+            // and the sides; this is the breath before the first line.
+            .pb(px(6.))
             .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
+                pill()
                     .child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .gap_1()
-                            .child(
-                                Input::new(&self.search_input)
-                                    .focus_bordered(false)
-                                    .suffix(
-                                        Button::new("case-insensitive")
-                                            .selected(!self.case_insensitive)
-                                            .xsmall()
-                                            .compact()
-                                            .ghost()
-                                            .icon(IconName::CaseSensitive)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.case_insensitive = !this.case_insensitive;
-                                                this.update_search_query(cx);
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .small()
-                                    .w_full()
-                                    .shadow_none(),
-                            )
-                            .on_prepaint({
-                                let view = cx.entity();
-                                move |bounds, _, cx| {
-                                    view.update(cx, |r, _| r.input_width = bounds.size.width)
-                                }
-                            }),
+                        Icon::new(IconName::Search)
+                            .size(px(12.))
+                            .text_color(muted)
+                            .flex_none(),
+                    )
+                    .child(field(&self.search_input))
+                    .child(
+                        Button::new("case-sensitive")
+                            .xsmall()
+                            .ghost()
+                            .selected(!self.case_insensitive)
+                            .label("Aa")
+                            .tooltip(t!("Input.Match Case"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.case_insensitive = !this.case_insensitive;
+                                this.update_search_query(cx);
+                                cx.notify();
+                            })),
                     )
                     .when(allow_replace, |this| {
                         this.child(
-                            Button::new("replace-mode")
-                                .xsmall()
-                                .ghost()
-                                .icon(IconName::Replace)
+                            tool("replace-mode", IconName::Replace)
                                 .selected(self.replace_mode)
+                                .tooltip(t!("Input.Replace"))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.replace_mode = !this.replace_mode;
-                                    if this.replace_mode {
-                                        this.replace_input
-                                            .read(cx)
-                                            .focus_handle
-                                            .clone()
-                                            .focus(window, cx);
-                                    } else {
-                                        this.search_input
-                                            .read(cx)
-                                            .focus_handle
-                                            .clone()
-                                            .focus(window, cx);
-                                    }
-                                    cx.notify();
+                                    this.set_replace_mode(!this.replace_mode, window, cx);
                                 })),
                         )
                     })
+                    .child(divider())
                     .child(
-                        Button::new("prev")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::ChevronLeft)
+                        div()
+                            .flex_none()
+                            .min_w(px(50.))
+                            .text_center()
+                            .text_size(px(11.5))
+                            .whitespace_nowrap()
+                            .text_color(count_color)
+                            .child(count),
+                    )
+                    .child(
+                        tool("prev", IconName::ChevronUp)
                             .disabled(!has_matches)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.prev(window, cx);
                             })),
                     )
                     .child(
-                        Button::new("next")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::ChevronRight)
+                        tool("next", IconName::ChevronDown)
                             .disabled(!has_matches)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.next(window, cx);
                             })),
                     )
-                    .child(
-                        Label::new(self.matcher.label())
-                            .when(!has_matches, |this| {
-                                this.text_color(cx.theme().muted_foreground)
-                            })
-                            .text_left()
-                            .min_w_16(),
-                    )
-                    .child(div().w_7())
-                    .child(
-                        Button::new("close")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::Close)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.on_action_escape(&Escape, window, cx);
-                            })),
-                    ),
+                    .child(tool("close", IconName::Close).on_click(cx.listener(
+                        |this, _, window, cx| {
+                            this.on_action_escape(&Escape, window, cx);
+                        },
+                    ))),
             )
             .when(self.replace_mode && allow_replace, |this| {
                 this.child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
+                    pill()
                         .child(
-                            Input::new(&self.replace_input)
-                                .focus_bordered(false)
-                                .small()
-                                .w(self.input_width)
-                                .shadow_none(),
+                            Icon::new(IconName::Replace)
+                                .size(px(12.))
+                                .text_color(muted)
+                                .flex_none(),
                         )
+                        .child(field(&self.replace_input))
                         .child(
                             Button::new("replace-one")
-                                .small()
+                                .xsmall()
+                                .ghost()
                                 .label(t!("Input.Replace"))
                                 .disabled(!has_matches)
                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -609,7 +660,8 @@ impl Render for SearchPanel {
                         )
                         .child(
                             Button::new("replace-all")
-                                .small()
+                                .xsmall()
+                                .ghost()
                                 .label(t!("Input.Replace All"))
                                 .disabled(!has_matches)
                                 .on_click(cx.listener(|this, _, window, cx| {

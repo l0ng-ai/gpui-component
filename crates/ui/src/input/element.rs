@@ -2355,12 +2355,26 @@ impl Element for TextElement {
             // Paint selections
             if window.is_window_active() {
                 let secondary_selection = cx.theme().selection.saturation(0.1);
+                // Every hit gets a neutral wash of the ink; the current one a
+                // warm amber, so it reads apart from the hits and from the
+                // selection whatever colour the theme gives that.
+                let dark = cx.theme().is_dark();
+                let other_match = cx
+                    .theme()
+                    .foreground
+                    .opacity(if dark { 0.13 } else { 0.08 });
+                let current_match = if dark {
+                    gpui::hsla(36. / 360., 0.72, 0.58, 0.42)
+                } else {
+                    gpui::hsla(38. / 360., 0.69, 0.50, 0.34)
+                };
                 for (path, is_active) in prepaint.search_match_paths.iter() {
-                    window.paint_path(path.clone(), secondary_selection);
-
-                    if *is_active {
-                        window.paint_path(path.clone(), cx.theme().selection);
-                    }
+                    let color = if *is_active {
+                        current_match
+                    } else {
+                        other_match
+                    };
+                    window.paint_path(path.clone(), color);
                 }
 
                 if let Some(path) = prepaint.selection_path.take() {
