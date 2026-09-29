@@ -1102,7 +1102,26 @@ impl PopupMenu {
         // pill inset by the list's 5px padding (see `Render`) rather than a flat
         // full-bleed bar. The pill keeps the theme's soft accent fill/text
         // (`tokens.accent` / `accent_foreground` — see tty7's `apply_theme`).
+        // What a screen reader reads: the item's words, as a menu item, a
+        // checkable one where the item carries a check. A separator and a
+        // section caption are not items and stay out of the tree.
+        let accessible = match item {
+            PopupMenuItem::Item { label, checked, .. } => Some((
+                if *checked {
+                    gpui::Role::MenuItemCheckBox
+                } else {
+                    gpui::Role::MenuItem
+                },
+                Some(label.clone()),
+            )),
+            PopupMenuItem::Submenu { label, .. } => {
+                Some((gpui::Role::MenuItem, Some(label.clone())))
+            }
+            PopupMenuItem::ElementItem { .. } => Some((gpui::Role::MenuItem, None)),
+            PopupMenuItem::Separator | PopupMenuItem::Label(_) => None,
+        };
         let this = MenuItemElement::new(ix, &group_name)
+            .when_some(accessible, |this, (role, label)| this.accessible(role, label))
             .relative()
             .text_size(px(13.))
             .py_0()

@@ -13,6 +13,8 @@ pub(crate) struct MenuItemElement {
     style: StyleRefinement,
     disabled: bool,
     selected: bool,
+    /// How assistive technology sees the row: a role, and the name to read.
+    accessible: Option<(gpui::Role, Option<SharedString>)>,
     on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
     on_hover: Option<Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>>,
     children: SmallVec<[AnyElement; 2]>,
@@ -28,10 +30,17 @@ impl MenuItemElement {
             style: StyleRefinement::default(),
             disabled: false,
             selected: false,
+            accessible: None,
             on_click: None,
             on_hover: None,
             children: SmallVec::new(),
         }
+    }
+
+    /// Expose the row to assistive technology as `role`, read as `label`.
+    pub(crate) fn accessible(mut self, role: gpui::Role, label: Option<SharedString>) -> Self {
+        self.accessible = Some((role, label));
+        self
     }
 
     /// Set ListItem as the selected item style.
@@ -84,8 +93,13 @@ impl ParentElement for MenuItemElement {
 
 impl RenderOnce for MenuItemElement {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let accessible = self.accessible;
         h_flex()
             .id(self.id)
+            .when_some(accessible, |this, (role, label)| {
+                this.role(role)
+                    .when_some(label, |this, label| this.aria_label(label))
+            })
             .group(&self.group_name)
             .gap_x_1()
             .py_1()
