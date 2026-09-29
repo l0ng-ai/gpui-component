@@ -210,6 +210,9 @@ pub struct Button {
 
     tab_index: isize,
     tab_stop: bool,
+    /// What assistive technology announces, when neither the label nor the
+    /// tooltip says it — an icon button with no tooltip, say.
+    accessible_label: Option<SharedString>,
 }
 
 impl From<Button> for AnyElement {
@@ -243,6 +246,7 @@ impl Button {
             border_edges: Edges::all(true),
             size: Size::Medium,
             tooltip: None,
+            accessible_label: None,
             tooltip_builder: None,
             on_click: None,
             on_hover: None,
@@ -290,6 +294,13 @@ impl Button {
     /// Set the icon of the button, if the Button have no label, the button well in Icon Button mode.
     pub fn icon(mut self, icon: impl Into<ButtonIcon>) -> Self {
         self.icon = Some(icon.into());
+        self
+    }
+
+    /// Set what a screen reader announces for the button. Without it the
+    /// label is used, and failing that the tooltip.
+    pub fn accessible_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessible_label = Some(label.into());
         self
     }
 
@@ -477,7 +488,17 @@ impl RenderOnce for Button {
             ButtonRounded::None => Pixels::ZERO,
         };
 
+        // A button is a button to assistive technology too, named by what a
+        // sighted user reads on or beside it. Without a role it was not in
+        // the accessibility tree at all.
+        let a11y_label = self
+            .accessible_label
+            .clone()
+            .or_else(|| self.label.clone())
+            .or_else(|| self.tooltip.as_ref().map(|(text, _)| text.clone()));
         self.base
+            .role(gpui::Role::Button)
+            .when_some(a11y_label, |this, label| this.aria_label(label))
             .when(!self.disabled, |this| {
                 this.track_focus(
                     &focus_handle

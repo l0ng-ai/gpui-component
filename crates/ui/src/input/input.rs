@@ -3,8 +3,8 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, DefiniteLength, Edges, EdgesRefinement, Entity, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Rems, RenderOnce, StyleRefinement, Styled,
-    TextAlign, Window, div, px, relative,
+    IntoElement, MouseButton, ParentElement as _, Rems, RenderOnce,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, TextAlign, Window, div, px, relative,
 };
 
 use crate::button::{Button, ButtonVariants as _};
@@ -287,8 +287,21 @@ impl RenderOnce for Input {
             && state.mode.is_single_line();
         let has_suffix = suffix.is_some() || state.loading || self.mask_toggle || show_clear_button;
 
+        // A text field to assistive technology, named by its placeholder —
+        // the only words these fields carry. Without a role the field, and
+        // with it the focus, was invisible to a screen reader.
+        let a11y_role = if state.masked {
+            gpui::Role::PasswordInput
+        } else if state.mode.is_multi_line() {
+            gpui::Role::MultilineTextInput
+        } else {
+            gpui::Role::TextInput
+        };
+        let a11y_label = (!state.placeholder.is_empty()).then(|| state.placeholder.clone());
         div()
             .id(("input", self.state.entity_id()))
+            .role(a11y_role)
+            .when_some(a11y_label, |this, label| this.aria_label(label))
             .flex()
             .key_context(
                 if state.mode.is_code_editor() && state.mode.is_multi_line() {
