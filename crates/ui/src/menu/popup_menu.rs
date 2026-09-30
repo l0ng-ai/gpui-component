@@ -1427,12 +1427,14 @@ impl Render for PopupMenu {
 
 /// v5's `--pop-sh` minus its ring (drawn as the border): a long shadow that
 /// lifts the menu off the window, and in light mode a short one under it.
+/// Kept tight: at 64px blur and 28% ink the halo spread a grey cloud well past
+/// the menu's own footprint, heavier than any other surface in the window.
 fn v5_popover_shadow(dark: bool) -> Vec<gpui::BoxShadow> {
     let long = gpui::BoxShadow {
-        color: gpui::black().opacity(if dark { 0.6 } else { 0.28 }),
-        offset: gpui::point(px(0.), px(24.)),
-        blur_radius: px(64.),
-        spread_radius: px(-12.),
+        color: gpui::black().opacity(if dark { 0.45 } else { 0.12 }),
+        offset: gpui::point(px(0.), px(10.)),
+        blur_radius: px(28.),
+        spread_radius: px(-6.),
         inset: false,
     };
     match dark {
@@ -1441,8 +1443,8 @@ fn v5_popover_shadow(dark: bool) -> Vec<gpui::BoxShadow> {
             long,
             gpui::BoxShadow {
                 color: gpui::black().opacity(0.06),
-                offset: gpui::point(px(0.), px(4.)),
-                blur_radius: px(12.),
+                offset: gpui::point(px(0.), px(2.)),
+                blur_radius: px(6.),
                 spread_radius: px(0.),
                 inset: false,
             },
